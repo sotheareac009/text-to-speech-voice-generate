@@ -19,12 +19,15 @@ React UI  ──HTTP──▶  Python engine (127.0.0.1:8008)  ──▶  VoxCPM
 
 - **30 languages including Khmer** — the language is detected from the text, so
   there's nothing to select.
-- **Two premium lead voices** — "main character" rather than utility announcer:
-  designed from a description, then cached so the same voice comes back every
-  time.
+- **Three premium lead voices** — "main character" rather than utility
+  announcer: designed from a description, then cached so the same voice comes
+  back every time.
 - **Voice cloning** from a 20–30s clip.
 - **Khmer number normalisation** — `ថ្ងៃទី12` → `ថ្ងៃទីដប់ពីរ`,
   `ឆ្នាំ2026` → `ឆ្នាំពីរពាន់ម្ភៃប្រាំមួយ`. Without this, digits come out garbled.
+- **Mixed Khmer/English** — each script run is normalised in its own language,
+  and the languages are given separate generations where they're long enough to
+  stand alone. See [Mixed Khmer and English](#mixed-khmer-and-english).
 - **Long-form synthesis** — long text is split into sentence-sized chunks so the
   voice doesn't tear or drift, with the voice pinned across all chunks.
 - **Commercial voice tuner** — see below.
@@ -95,6 +98,12 @@ The ceiling is a **true-peak** figure, so the limiter detects on the 4×
 oversampled signal: a waveform held at -1 dBFS sample-peak still reconstructs
 to about -0.4 dBTP between samples.
 
+The limiter runs *after* the loudness normalisation, so whatever it takes off
+the peaks comes off the loudness too and the delivered level can sit up to
+about 1 LU under the target — measured at -17.1 LUFS against a -16 target on a
+dense take. The target is what the chain aims for; the Result card reports what
+it actually achieved, which is the number to trust.
+
 ### Keeping one voice across a long script
 
 Each sentence is a separate generation, so nothing inherently forces sentence
@@ -149,10 +158,26 @@ and pulled together (by up to 6 dB) before being joined.
 Both are designed from a description rather than shipped as audio, since
 VoxCPM2 can invent a voice from text alone:
 
-| | Description |
-| --- | --- |
-| **Lead female** | young adult, warm and resonant, composed and confident, cinematic narrator, smooth and unhurried |
-| **Lead male** | adult, deep and resonant with a rich chest tone, calm and commanding, cinematic narrator, smooth and unhurried |
+| | Description | f0 target |
+| --- | --- | --- |
+| **Lead female** | young adult, warm and resonant, composed and confident, cinematic narrator | 165–265 Hz |
+| **Lead male** | a man in his thirties, warm and resonant, clear and confident, cinematic narrator | 90–150 Hz |
+| **Young male** | a young man of about twenty-three, bright and warm, clear and confident, cinematic narrator | 115–175 Hz |
+
+The picker shows one button per `group` and a dropdown for that group's
+variants, so **Male** carries both male voices rather than each voice taking its
+own button. The variant chosen in a group is remembered when switching away and
+back.
+
+Adding a voice is a dict entry in [voices.py](python/voices.py) — the engine
+serves the table to the interface, so nothing in the frontend changes. Give it
+an `f0_range` that doesn't sit on top of an existing voice's, or the two
+converge on the same register and there's no point having both. `group` and
+`variant` are presentation only and deliberately excluded from the cache
+fingerprint, so renaming them doesn't trigger a redesign.
+
+**The engine reads this table once, at startup.** After editing it, restart the
+app — the frontend hot-reloads but the Python process does not.
 
 A designed voice is re-rolled on every call, which would mean a different
 person reading each sentence — so the description is rendered once and that
@@ -180,6 +205,48 @@ steadiest periodicity of any take measured.
 The cached clip is conditioned before being stored — **level and rumble only**.
 Nothing tonal: a reference is cloned *from*, so presence or air added there
 would be baked into every take made with that voice.
+
+### Mixed Khmer and English
+
+Khmer product copy is full of English words — `ជ្រើសរើសយក Food & Drink រួចចុច
+Button Create my store`. Two things were wrong with how that was handled.
+
+**English numbers were spoken in Khmer.** The old code asked "does this text
+contain any Khmer?" and, if so, ran Khmer number normalisation over the whole
+string, English included:
+
+| input | was | now |
+| --- | --- | --- |
+| `Save 50% today ជា` | `Save ហាសិបភាគរយ today ជា` | `Save 50 percent today ជា` |
+| `Costs $20 ជា` | `Costs ដុល្លារម្ភៃ ជា` | `Costs 20 dollars ជា` |
+
+Text is now normalised run by run, each in its own language. Digits and symbols
+join the run they sit in, so `50%` stays Khmer in `តម្លៃ 50%` and English in
+`Save 50% today`. English shorthand is spelled out too (`&` → `and`, `u` →
+`you`), since the model mumbles bare symbols and single letters.
+
+**One generation had to code-switch repeatedly.** A chunk like the example above
+switches language three times inside a single utterance, and the losing language
+comes out in the other one's phonetics — a Khmer recogniser transcribed "Food
+and Drink" as `ហ្វួត អ៊នរីង` and "Create my store" as `គ្រី អេទ ម៉ៃស្ទោ`. That is
+what makes embedded English hard to follow: a speech recogniser still recovers
+the words, because it tolerates accent, but a listener expecting English does
+not.
+
+Each language now gets its own generation where the runs are long enough to
+stand alone, with the reference clip keeping it the same voice throughout. Runs
+shorter than 20 characters are merged back into a neighbour, because on their
+own they render as padding or a repeat — "Food and Drink" alone came back as
+near-silence. So densely interleaved copy, a couple of English words per Khmer
+phrase, stays mixed by design: splitting it trades an accent problem for a worse
+one. Copy with substantial runs separates cleanly.
+
+**What is still imperfect.** Short English fragments embedded in Khmer are read
+with Khmer phonetics, and no text-level change fixes that — the model infers
+pronunciation from the surrounding language. Synthesised on their own the same
+fragments are word-perfect. If embedded English matters more than compactness,
+give it room: a full English sentence between Khmer sentences is rendered as
+English, a two-word label inside a Khmer phrase is not.
 
 ## Responsible use
 

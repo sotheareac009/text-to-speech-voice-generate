@@ -1,0 +1,13 @@
+# Voice engine — VoxCPM2 (Apache-2.0): 30 languages including Khmer,
+# voice cloning from a short clip, voice design from a description, 48 kHz out.
+# Brings its own torch / torchaudio / soundfile / numpy.
+voxcpm>=2.0.3
+
+# Mastering chain (filters, resampling, envelope followers). It arrives with
+# voxcpm anyway, but mastering.py imports it directly, so declare it.
+scipy>=1.11
+
+# Local HTTP server the app talks to.
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.12
