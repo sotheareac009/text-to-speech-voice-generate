@@ -25,6 +25,10 @@ dist-ssr
 
 
 # Python voice engine
+# Any virtualenv, whatever it is called: the venv carries 400 MB of torch
+# binaries that GitHub refuses outright, so match the name loosely.
 python/.venv/
+python/.venv-*/
 python/data/
 __pycache__/
+*.py[cod]
