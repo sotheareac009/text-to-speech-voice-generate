@@ -7,6 +7,10 @@ voxcpm>=2.0.3
 # voxcpm anyway, but mastering.py imports it directly, so declare it.
 scipy>=1.11
 
+# Pitch and timbre measurement for the drift check. Same story as scipy: it
+# comes in with voxcpm, but consistency.py imports it directly.
+librosa>=0.10
+
 # Local HTTP server the app talks to.
 fastapi>=0.115
 uvicorn>=0.30

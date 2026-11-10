@@ -24,12 +24,52 @@ from __future__ import annotations
 import math
 import os
 import re
+import sys
 import threading
 import traceback
 import uuid
 from pathlib import Path
 
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+
+class _UnbreakableStream:
+    """A stream whose writes can never raise.
+
+    The engine runs as a child process. If whatever started it exits first,
+    the pipe it was writing to loses its reader, and the very next write raises
+    BrokenPipeError. Raised from a log line in the middle of a request, that
+    aborted the whole job with "Synthesis failed: [Errno 32] Broken pipe" —
+    VoxCPM2 draws a progress bar on stderr while it generates, so every
+    synthesis hit it. Logging must never be able to fail the work it describes.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, data):
+        try:
+            return self._stream.write(data)
+        except (OSError, ValueError):
+            return len(data) if data else 0
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def flush(self):
+        try:
+            self._stream.flush()
+        except (OSError, ValueError):
+            pass
+
+    def __getattr__(self, name):          # isatty, fileno, encoding, …
+        return getattr(self._stream, name)
+
+
+# Before the third-party imports, so uvicorn and transformers capture these.
+sys.stdout = _UnbreakableStream(sys.stdout)
+sys.stderr = _UnbreakableStream(sys.stderr)
 
 import soundfile as sf  # noqa: E402
 import uvicorn  # noqa: E402
@@ -62,22 +102,46 @@ _ID_RE = re.compile(r"[0-9a-f]{32}")
 _model = None
 _status = "loading"      # loading | ready | error
 _error_detail = ""
+#: Why loading is taking so long, in words the UI can show. On a machine that
+#: has never run this model, startup is a ~5 GB download, and a progress-free
+#: "Starting engine…" for ten minutes looks indistinguishable from a hang.
+_notice = ""
 _voice_paths: dict[str, Path] = {}      # voice_id -> uploaded sample
 _voice_prompts: dict[str, str] = {}     # voice_id -> transcript of that sample
 _design_lock = threading.Lock()
 
 
+def _model_is_cached() -> bool:
+    """Has huggingface_hub already downloaded this model?
+
+    Only used to word the loading message. Reading the cache layout rather than
+    asking the hub keeps startup offline-safe.
+    """
+    home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+    hub = Path(os.environ.get("HUGGINGFACE_HUB_CACHE", home / "hub"))
+    return (hub / ("models--" + MODEL_ID.replace("/", "--"))).exists()
+
+
 def _load_model() -> None:
-    global _model, _status, _error_detail
+    global _model, _status, _error_detail, _notice
     try:
+        if _model_is_cached():
+            _notice = "Loading the voice model…"
+        else:
+            _notice = (
+                "First run: downloading the voice model (about 5 GB). "
+                "This happens once — later launches take seconds."
+            )
         from voxcpm import VoxCPM
-        print(f"[engine] loading {MODEL_ID} (first run downloads ~5GB)…", flush=True)
+        print(f"[engine] loading {MODEL_ID} — {_notice}", flush=True)
         _model = VoxCPM.from_pretrained(MODEL_ID, load_denoiser=False)
         _status = "ready"
+        _notice = ""
         print("[engine] ready", flush=True)
     except Exception as exc:  # noqa: BLE001
         _status = "error"
         _error_detail = f"{type(exc).__name__}: {exc}"
+        _notice = ""
         print("[engine] model failed to load:\n" + traceback.format_exc(), flush=True)
 
 
@@ -109,7 +173,13 @@ def health() -> JSONResponse:
     except Exception:  # noqa: BLE001
         pass
     return JSONResponse(
-        {"status": _status, "device": device, "detail": _error_detail, "model": MODEL_ID}
+        {
+            "status": _status,
+            "device": device,
+            # An error when there is one, otherwise what loading is busy with.
+            "detail": _error_detail or _notice,
+            "model": MODEL_ID,
+        }
     )
 
 

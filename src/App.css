@@ -278,3 +278,92 @@ body {
   font-family: inherit;
   font-size: 0.85rem;
 }
+
+/* ── First-run engine setup ───────────────────────────────────────────── */
+
+.setup-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+.setup-row .hint { margin: 0; }
+
+/* pip's output while the engine installs. Fixed height so the card doesn't
+   jump around, and pre-wrap so long wheel URLs stay readable. */
+.setup-log {
+  max-height: 240px;
+  overflow-y: auto;
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--sub);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.alert p { margin: 0 0 6px; }
+.alert p:last-child { margin: 0; }
+.alert .mono { color: #ffd9d5; }
+
+/* Inline paths inside a sentence shouldn't change the line's rhythm. */
+.hint .mono { font-size: 0.78rem; color: var(--sub); }
+
+/* ── The engine's library checklist ───────────────────────────────────── */
+
+.head-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.btn.tiny {
+  padding: 5px 10px;
+  font-size: 0.76rem;
+  border-radius: 7px;
+}
+
+.pkglist {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.pkg {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+.pkg:first-child { border-top: none; }
+.pkg.done { background: var(--panel2); }
+
+/* Fixed width so the names stay in a column whether ticked or not. */
+.pkg-mark {
+  flex: 0 0 18px;
+  text-align: center;
+  color: var(--green);
+  font-size: 0.9rem;
+}
+
+.pkg-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pkg-body strong { font-size: 0.9rem; font-weight: 600; }
+.pkg-note { font-size: 0.78rem; color: var(--muted); line-height: 1.45; }
+
+.pkg-state {
+  flex: 0 0 auto;
+  font-size: 0.76rem;
+  color: var(--green);
+}

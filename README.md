@@ -305,9 +305,10 @@ delivered loudness and true peak; **Save WAV…** opens a native save dialog.
 
 ```
 src/
-  App.tsx             the interface
-  engine.ts           client for the Python engine
-src-tauri/src/lib.rs  starts/stops the engine, saves clips via a native dialog
+  App.tsx             the interface, including first-run engine setup
+  engine.ts           client for the Python engine (HTTP)
+  install.ts          client for the Rust side: install / start the engine
+src-tauri/src/lib.rs  finds, installs, starts and stops the engine; saves clips
 python/
   server.py           FastAPI engine: /health, /voices, /tts, /audio, /tuner
   khmer_normalize.py  Khmer numbers/dates → spoken words
@@ -321,6 +322,184 @@ python/
 
 ## Building a distributable app
 
-`npm run tauri build` compiles the Rust/JS. Shipping the Python engine inside the
-bundle needs it packaged (e.g. PyInstaller) and added to Tauri's
-`bundle.resources`; that step isn't wired up yet, so use `npm run tauri dev`.
+```bash
+npm run tauri build
+```
+
+Artifacts land under `src-tauri/target/release/bundle/`:
+
+```
+macos/Voice Studio.app                 the app
+dmg/Voice Studio_0.1.0_aarch64.dmg     what you hand to someone else
+```
+
+`aarch64` is Apple Silicon, and a build only runs on the architecture it was
+built for. For an Intel Mac: `npm run tauri build --target x86_64-apple-darwin`.
+
+### What is in the bundle, and what isn't
+
+The `.app` carries the interface plus the engine's **Python sources** — about
+80 KB of `.py` files, listed under `bundle.resources` in
+`src-tauri/tauri.conf.json`. It does not carry the engine itself.
+
+That is deliberate. VoxCPM2 on PyTorch is about 420 MB of wheels that unpack to
+roughly 2 GB — `libtorch_cpu.dylib` alone is 402 MB of that — and the voice
+model it loads is another 5 GB. Sending someone a 7 GB payload to install a
+4 MB app makes no sense when none of those 7 GB are specific to your machine — and GitHub won't take the
+wheels either, which is what the `.gitignore` rule about `python/.venv-*/` is
+there to prevent.
+
+So the engine installs itself on first launch. The app opens on a checklist of
+the libraries it needs, each with its own **Install** button, plus **Install
+all** for one click. It looks for a Python 3.10–3.13 already on the machine,
+builds a virtualenv, and streams pip's own output into the window while it
+works — several silent minutes behind a spinner is indistinguishable from a
+hang, which is when people force-quit. When every row is ticked it says the
+engine is ready and offers to start it.
+
+The list, and the description under each library, are read from
+`python/requirements.txt` — the comment block above each entry is what the UI
+shows. Add a requirement there and it appears in the checklist with its
+explanation, with nothing to change in the interface.
+
+Installing one at a time is slower than `pip install -r` in one go, because
+`voxcpm` pulls in most of the others as dependencies and the remaining rows
+then finish instantly. It is worth it for being able to see what is going onto
+the machine, and for a failure leaving only one row to retry.
+
+Once everything is installed the checklist is still reachable, from **Engine
+libraries…** under the status badge.
+
+| | lives in |
+|---|---|
+| The app | `/Applications/Voice Studio.app` |
+| Engine virtualenv (~2.1 GB) | `~/Library/Application Support/com.sotheareach.voice-clone-tts/engine/` |
+| Clips, designed voices, uploads | `~/Library/Application Support/com.sotheareach.voice-clone-tts/data/` |
+| Voice model (~5 GB) | `~/.cache/huggingface/` |
+
+Deleting those three removes everything the app ever wrote. Nothing is
+installed outside the user's home directory, and nothing needs admin rights.
+
+Ship a new version with changed `requirements.txt` and the app notices: it
+compares the file against `engine/installed.json` and offers to update the
+virtualenv, with **Use it as it is** to carry on regardless.
+
+If an engine is already answering on port 8008 — one started by hand, or a
+leftover from `npm run tauri dev` — the app uses it and never asks to install
+anything. That is worth knowing when testing the DMG on your own machine: quit
+the dev engine first, or you will not see the setup card at all.
+
+```bash
+pkill -f 'python/server.py'       # frees the port so first-run setup appears
+```
+
+In development none of this applies — `npm run tauri dev` uses
+`python/.venv-voxcpm` directly and writes to `python/data`, so your working
+engine is never touched by the installer.
+
+### When the engine misbehaves
+
+The app installs in the GUI, but the same install runs from a terminal:
+
+```bash
+cd "/Applications/Voice Studio.app/Contents/MacOS"
+./voice-clone-tts --list-libraries                        # the checklist, as JSON
+./voice-clone-tts --install-engine                        # every library
+./voice-clone-tts --install-library 'scipy>=1.11'         # one row of the list
+```
+
+Each runs exactly the code the matching button runs, prints every step, and
+exits non-zero on failure — the quickest way to see *why* an install failed on
+someone else's machine. The in-app log shows the same lines, but a terminal
+keeps them after the app closes. `--install-library` only accepts a line that
+is actually in the engine's requirements.
+
+The engine's own output goes to `engine.log` beside the clips, in
+`~/Library/Application Support/com.sotheareach.voice-clone-tts/data/`. It is
+rewritten on each launch, so it always describes the current run.
+
+It is written to a *file* deliberately. Inheriting the app's stdio would mean
+writing into a pipe, and a pipe outlives its reader: once whatever started the
+engine exits, the engine's next log line raises `BrokenPipeError`. That turned
+every synthesis into `Synthesis failed: [Errno 32] Broken pipe`, because
+VoxCPM2 draws a progress bar on stderr while it generates — a log line failing
+the work it was describing. The engine now also wraps its own streams so a
+write can never raise, which covers an engine someone started by hand from a
+terminal that has since closed.
+
+If the engine is installed but nothing answers within twenty seconds, the app
+stops waiting and offers **Start it again** and **Reinstall the engine**. The
+usual cause is a Python upgrade: a virtualenv links to the exact interpreter it
+was built from, so `brew upgrade python@3.11` can leave the venv pointing at a
+framework that has moved. Reinstalling rebuilds it against the current Python.
+
+### Signing: ad-hoc, not notarised
+
+`bundle.macOS.signingIdentity` is `"-"`, which ad-hoc signs the bundle: no Apple
+account, no certificate, but a real `_CodeSignature/CodeResources` sealing the
+app. **This is not optional cosmetics.** Without it, Tauri leaves the main
+binary linker-signed, and a linker signature *declares* a sealed resource list
+that does not exist:
+
+```
+$ codesign --verify --deep --strict "Voice Studio.app"
+Voice Studio.app: code has no resources but signature indicates they must be present
+```
+
+That is an *invalid* signature, not a missing one — and macOS reports an invalid
+signature on a quarantined app as:
+
+> "Voice Studio" is damaged and can't be opened. You should move it to the Trash.
+
+with **no "Open Anyway" offered in Privacy & Security**, because that override
+exists only for apps whose signature is valid but untrusted. It is a dead end,
+and the app is not damaged at all. Ad-hoc signing turns it into the ordinary,
+recoverable case.
+
+Because the app is sealed, nothing may write inside the bundle at runtime or the
+seal breaks — which is why the engine's bytecode goes to `PYTHONPYCACHEPREFIX`
+and its log to the data directory rather than next to the sources.
+
+The recipient still sees a warning, because ad-hoc signing carries no Team ID
+and the app is not notarised. Either route works:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Voice Studio.app"   # then it just opens
+```
+
+or open it, let macOS refuse, then **System Settings → Privacy & Security →
+Open Anyway** — which now appears. On macOS 13 and 14, right-click → **Open**
+also works; macOS 15 removed that shortcut, leaving the two routes above.
+
+Removing the warning entirely needs a real Developer ID certificate plus
+notarisation (`codesign` with the certificate, then `notarytool`), which means
+the Apple Developer Program at $99/year.
+
+### What to tell whoever you send it to
+
+> **You need:** macOS 12 or later; Apple Silicon strongly preferred (Intel
+> works but is several times slower); about **10 GB** of free disk space; an
+> internet connection for the first run; and **Python 3.11**, from
+> `brew install python@3.11` or the installer at python.org/downloads.
+>
+> **Installing:** open the DMG, drag Voice Studio to Applications, then run
+> `xattr -dr com.apple.quarantine "/Applications/Voice Studio.app"` in Terminal
+> once. Open the app.
+>
+> **First launch** shows a setup card. Press **Install engine** and leave the
+> window open — it downloads about 420 MB, unpacks to roughly 2 GB, and takes
+> a few minutes, with a running log so you can see it working. When it finishes the app switches to the normal
+> interface by itself.
+>
+> **The first time you press Generate speech** it downloads the voice model,
+> another ~5 GB, once. The badge top-right says what it is doing. Every launch
+> after that is quick.
+>
+> Everything runs on your own machine. No text or audio is sent anywhere.
+
+If the setup card reports **no usable Python found**, the machine either has no
+Python or only the macOS system 3.9, which is too old for current torch wheels.
+Installing Python 3.11 and reopening the app fixes it; the app looks in
+`/opt/homebrew/bin`, `/usr/local/bin` and
+`/Library/Frameworks/Python.framework` by absolute path, because an app
+launched from Finder gets a bare `PATH` and cannot see a shell's Python.
