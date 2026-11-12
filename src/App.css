@@ -367,3 +367,23 @@ body {
   font-size: 0.76rem;
   color: var(--green);
 }
+
+/* Section heading inside a step, above a group of controls. */
+.sub-head {
+  margin: 20px 0 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+/* Name and delete for a saved clone. Sits under the picker so the controls
+   for a voice are next to the voice they act on. */
+.saved-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+.saved-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}

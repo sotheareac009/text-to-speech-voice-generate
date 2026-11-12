@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
+  exportFor,
   fetchClip,
   getHealth,
   getTuner,
   registerVoice,
+  renameVoice,
+  forgetVoice,
+  type Cleanup,
+  type ShareTarget,
   synthesize,
   type BuiltinVoice,
   type Clip,
@@ -19,11 +25,14 @@ import {
   installEngine,
   installEnvironment,
   installPackage,
+  getEngineOptions,
+  setEngineMode,
   onInstallDone,
   onInstallLine,
   startEngine,
   type EngineState,
   type EnginePackages,
+  type EngineOptions,
 } from "./install";
 import "./App.css";
 
@@ -36,6 +45,51 @@ const FALLBACK_VOICES: BuiltinVoice[] = [
   { key: "female", label: "Lead female", blurb: "", describe: "", group: "Female", variant: "Lead" },
   { key: "male", label: "Lead male", blurb: "", describe: "", group: "Male", variant: "Lead" },
 ];
+
+/**
+ * The chat apps a clip can be handed to.
+ *
+ * Finding and raising the installed app is the Rust side's job — see
+ * `share_to_chat_app`, and `python/share.py` for what each one wants encoded
+ * and why. `web` is only for running in a plain browser, where there is no
+ * Rust side to ask.
+ */
+const SHARE: Record<ShareTarget, { label: string; button: string; hint: string; web: string }> = {
+  telegram: {
+    label: "Telegram",
+    button: "Telegram voice",
+    hint:
+      "Encode as OGG/Opus, mono — what Telegram wants for voice — then copy it and open " +
+      "Telegram. A pasted file arrives as an audio message; the waveform bubble needs " +
+      "Telegram's own mic or a bot.",
+    web: "https://web.telegram.org/",
+  },
+  messenger: {
+    label: "Messenger",
+    button: "Messenger",
+    hint:
+      "Encode as AAC, copy it and open Messenger. Facebook has no way for an app to send " +
+      "the file itself, so the paste is yours to make.",
+    web: "https://www.messenger.com/",
+  },
+};
+
+/** Which app was brought to the front. Mirrors `Raised` in `lib.rs`. */
+interface Raised {
+  /** Bundle id of the app raised, or "" when it wasn't installed. */
+  app: string;
+  /** Web client opened instead, or "" when the app was raised. */
+  web: string;
+}
+
+const SHARE_ORDER: ShareTarget[] = ["telegram", "messenger"];
+
+/**
+ * What a save writes: the clip as the engine made it, or the clip re-encoded
+ * for a chat app — so the Telegram voice file can be kept as a file instead of
+ * only being handed straight to Telegram.
+ */
+type SaveAs = "wav" | ShareTarget;
 
 function App() {
   const [status, setStatus] = useState<EngineStatus>("loading");
@@ -50,6 +104,8 @@ function App() {
   const [transcript, setTranscript] = useState("");
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [cloning, setCloning] = useState(false);
+  const [cleanup, setCleanup] = useState<Cleanup | null>(null);
+  const [voiceName, setVoiceName] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Commercial tuner. `catalog` comes from the engine, so the presets live in
@@ -61,8 +117,11 @@ function App() {
   const [text, setText] = useState("");
   const [generating, setGenerating] = useState(false);
   const [clip, setClip] = useState<Clip | null>(null);
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving] = useState<SaveAs | "">("");
   const [savedTo, setSavedTo] = useState("");
+  // Which chat app is being encoded for, and how the last share went.
+  const [sharing, setSharing] = useState<ShareTarget | "">("");
+  const [shared, setShared] = useState("");
   const [error, setError] = useState("");
 
   // The engine is installed by the user on first run rather than shipped in the
@@ -154,8 +213,23 @@ function App() {
     if (!file) return;
     setError("");
     setCloning(true);
+    setCleanup(null);
     try {
-      setVoiceId(await registerVoice(file, text));
+      const { voiceId: id, cleanup: report, name } = await registerVoice(
+        file,
+        text,
+        true,
+        voiceName || file.name.replace(/\.[^.]+$/, ""),
+      );
+      setVoiceId(id);
+      setCleanup(report);
+      setVoiceName(name);
+      // The engine has just gained a voice, so the picker's list is stale.
+      // Refetching is what puts the new clone under "My voices" without a
+      // restart, and selecting it is what the person expects after a clone.
+      const fresh = await getTuner();
+      setCatalog(fresh);
+      setMode(id);
     } catch (e) {
       setError(messageOf(e));
     } finally {
@@ -163,9 +237,36 @@ function App() {
     }
   }
 
+  /** Rename a saved clone, then refresh so the picker shows the new name. */
+  async function onRenameVoice(id: string, name: string) {
+    if (!name.trim()) return;
+    try {
+      await renameVoice(id, name.trim());
+      setCatalog(await getTuner());
+    } catch (e) {
+      setError(messageOf(e));
+    }
+  }
+
+  /** Delete a saved clone and its recording, then fall back to a built-in. */
+  async function onForgetVoice(id: string) {
+    try {
+      await forgetVoice(id);
+      const fresh = await getTuner();
+      setCatalog(fresh);
+      // Never leave the picker pointing at a voice that no longer exists.
+      const fallback = fresh.voices.find((v) => !v.saved);
+      if (fallback) setMode(fallback.key);
+      if (voiceId === id) setVoiceId("");
+    } catch (e) {
+      setError(messageOf(e));
+    }
+  }
+
   function onPickFile(file: File | undefined) {
     if (!file) return;
     setVoiceId("");
+    setCleanup(null);
     setSampleName(file.name);
     setPendingFile(file);
     useSample(file, transcript);
@@ -200,25 +301,46 @@ function App() {
   }
 
   /**
-   * Save a copy of the clip. In the app this goes through a native save dialog
-   * on the Rust side — WKWebView ignores `<a download>`, so the plain anchor
-   * this used to be did nothing at all. In a browser (`npm run dev`) the
-   * anchor still works, so fall back to it there.
+   * Save a copy of the clip — the engine's WAV, or the file one of the chat
+   * apps wants. In the app this goes through a native save dialog on the Rust
+   * side — WKWebView ignores `<a download>`, so the plain anchor this used to
+   * be did nothing at all. In a browser (`npm run dev`) the anchor still
+   * works, so fall back to it there.
+   *
+   * Saving the chat-app encoding is separate from sharing it on purpose: the
+   * share buttons put the file on the clipboard and open the app, which is no
+   * use when the file is wanted for later, for another device, or for a chat
+   * on a phone.
    */
-  async function onSave() {
+  async function onSave(as: SaveAs = "wav") {
     if (!clip) return;
     setError("");
     setSavedTo("");
-    setSaving(true);
+    setShared("");
+    setSaving(as);
     try {
+      // The chat-app encodings do not exist until they are asked for; the
+      // engine builds one and caches it beside the clip.
+      const made = as === "wav" ? null : await exportFor(clip, as);
       if (isTauri()) {
-        const dest = await invoke<string | null>("save_audio", { audioId: clip.id });
+        const dest = await invoke<string | null>("save_audio", {
+          audioId: clip.id,
+          // Where the engine says it wrote the file. The app usually
+          // started that engine and knows the directory itself, but not
+          // when another one was already on the port — then this is the
+          // only way to find the clip that is playing.
+          enginePath: made ? made.path : clip.path,
+          // The encoder decides the container, so this comes from the engine
+          // rather than from the button that was pressed.
+          format: made ? made.format : "wav",
+        });
         if (dest) setSavedTo(dest);
       } else {
-        const href = URL.createObjectURL(await fetchClip(clip));
+        const blob = made ? await (await fetch(made.url)).blob() : await fetchClip(clip);
+        const href = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = href;
-        link.download = "speech.wav";
+        link.download = made ? `voice.${made.format}` : "speech.wav";
         link.click();
         // Revoking straight away cancels the download in some browsers.
         setTimeout(() => URL.revokeObjectURL(href), 10_000);
@@ -227,9 +349,76 @@ function App() {
     } catch (e) {
       setError(messageOf(e));
     } finally {
-      setSaving(false);
+      setSaving("");
     }
   }
+
+  /**
+   * Hand a clip to a chat app.
+   *
+   * Neither of these lets a desktop app drop a file straight into a
+   * conversation: Telegram's only route is a bot you would have to register
+   * first, and Messenger has none at all — its API is for Pages replying to
+   * people who wrote to them. So this does the parts that can be automated —
+   * encode the clip to the format that app wants, open the app, and put the
+   * file on screen in Finder — and leaves the drag to you.
+   */
+  async function onShare(target: ShareTarget) {
+    if (!clip) return;
+    setError("");
+    setSavedTo("");
+    setShared("");
+    setSharing(target);
+    try {
+      const made = await exportFor(clip, target);
+      const format = made.format.toUpperCase();
+      if (isTauri()) {
+        const copied = await invoke<boolean>("copy_clip_to_clipboard", {
+          audioId: clip.id,
+          path: made.path,
+        });
+        // The clipboard is the whole point, but if it refuses the file the user
+        // can still drag it out of Finder.
+        if (!copied) await revealItemInDir(made.path);
+        // Said before the chat app is raised, because that covers this window
+        // and the instruction has to be on screen by then.
+        setShared(
+          copied
+            ? `${format} copied — press ⌘V in ${SHARE[target].label} to attach it`
+            : `${format} ready in Finder — drag it into ${SHARE[target].label}`,
+        );
+        // Refine it once we know whether the app was there, for when they come
+        // back to this window.
+        const raised = await invoke<Raised>("raise_chat_app", { target });
+        if (raised.web && copied) {
+          // A web client is the less certain target for a paste, so give the
+          // drag as well: dropping a file on a conversation always works.
+          await revealItemInDir(made.path);
+          setShared(
+            `${format} copied and shown in Finder — paste or drag it into the ` +
+              `${SHARE[target].label} tab`,
+          );
+        }
+      } else {
+        // `npm run dev` in a browser: there is no Finder, so download it.
+        const href = URL.createObjectURL(await (await fetch(made.url)).blob());
+        const link = document.createElement("a");
+        link.href = href;
+        link.download = `speech.${made.format}`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(href), 10_000);
+        setShared(`${format} downloaded — attach it in ${SHARE[target].label}`);
+        window.open(SHARE[target].web, "_blank", "noopener");
+      }
+    } catch (e) {
+      setError(messageOf(e));
+    } finally {
+      setSharing("");
+    }
+  }
+
+  // Saving and sharing both read the same clip off disk; let one finish first.
+  const busy = saving !== "" || sharing !== "";
 
   const builtins = catalog?.voices.length ? catalog.voices : FALLBACK_VOICES;
   // One button per group, with a dropdown for its variants — otherwise the
@@ -255,6 +444,7 @@ function App() {
   const ready = status === "ready";
   const voiceReady = mode !== UPLOAD || !!voiceId;
   const canGenerate = ready && voiceReady && text.trim().length > 0 && !generating;
+  const genElapsed = useElapsed(generating);
 
   if (needsEngine && engine) {
     return (
@@ -304,7 +494,9 @@ function App() {
         </div>
       </header>
 
-      {status === "loading" && health?.detail && (
+      {/* Shown while loading *and* once ready: a CPU fallback is permanent
+          news, not a progress message. */}
+      {status !== "error" && health?.detail && (
         <p className="hint note">{health.detail}</p>
       )}
       {status === "error" && health?.detail && (
@@ -377,12 +569,30 @@ function App() {
                 <p className="hint muted">
                   {chosen?.blurb || "Built-in voice — nothing to set up."}
                 </p>
+                {chosen?.saved && (
+                  <div className="saved-row">
+                    <input
+                      type="text"
+                      aria-label="Voice name"
+                      defaultValue={chosen.label}
+                      key={chosen.key}
+                      onBlur={(e) => onRenameVoice(chosen.key, e.target.value)}
+                    />
+                    <button
+                      className="btn ghost tiny"
+                      onClick={() => onForgetVoice(chosen.key)}
+                    >
+                      Delete voice
+                    </button>
+                  </div>
+                )}
               </>
             ) : (
               <>
                 <p className="hint">
-                  Upload <strong>20–30 seconds</strong> of one person speaking clearly — no music or
-                  background noise. Only clone a voice you have permission to use.
+                  Upload <strong>20–30 seconds</strong> of one person speaking clearly. Music or
+                  background noise is stripped out automatically. Only clone a voice you have
+                  permission to use.
                 </p>
                 <input
                   ref={fileRef}
@@ -397,12 +607,13 @@ function App() {
                   </button>
                   <span className="sample-name">
                     {cloning
-                      ? "Saving sample…"
+                      ? "Removing background… this takes a moment"
                       : voiceId
                         ? `✓ ${sampleName} — voice ready`
                         : sampleName || "No file selected"}
                   </span>
                 </div>
+                {!cloning && cleanup && <CleanupNote cleanup={cleanup} />}
 
                 <label className="field">
                   <span>What the clip says (optional — improves the clone)</span>
@@ -474,7 +685,7 @@ function App() {
             <div className="controls">
               <span className="count">{text.trim().length} characters</span>
               <button className="btn primary" onClick={onGenerate} disabled={!canGenerate}>
-                {generating ? "Generating…" : "Generate speech"}
+                {generating ? `Generating… ${genElapsed}s` : "Generate speech"}
               </button>
             </div>
 
@@ -494,11 +705,35 @@ function App() {
               instead of holding on to the previous source. */}
           <audio key={clip.url} controls src={clip.url} />
           <div className="result-row">
-            <button className="btn ghost" onClick={onSave} disabled={saving}>
-              {saving ? "Saving…" : "Save WAV…"}
+            <button className="btn ghost" onClick={() => onSave()} disabled={busy}>
+              {saving === "wav" ? "Saving…" : "Save WAV…"}
             </button>
+            <button
+              className="btn ghost"
+              onClick={() => onSave("telegram")}
+              disabled={busy}
+              title={
+                "Save the Telegram voice file itself: OGG/Opus, mono, 32 kbps — the same " +
+                "encoding Telegram's own recorder sends. Attached as a file it arrives as " +
+                "an audio message; the waveform bubble needs Telegram's mic or a bot."
+              }
+            >
+              {saving === "telegram" ? "Encoding…" : "Save voice message…"}
+            </button>
+            {SHARE_ORDER.map((key) => (
+              <button
+                key={key}
+                className="btn ghost"
+                onClick={() => onShare(key)}
+                disabled={busy}
+                title={SHARE[key].hint}
+              >
+                {sharing === key ? "Encoding…" : SHARE[key].button}
+              </button>
+            ))}
             <span className="hint muted">
-              {savedTo ? `Saved to ${savedTo}` : <ClipFacts clip={clip} catalog={catalog} />}
+              {shared ||
+                (savedTo ? `Saved to ${savedTo}` : <ClipFacts clip={clip} catalog={catalog} />)}
             </span>
           </div>
           {clip.instruction && (
@@ -580,6 +815,25 @@ function Tuner({
       )}
 
       <div className="knobs">
+        {/* Pace sits outside the directed block because it is the one control
+            that still means something with no style attached: slowing a read
+            down is not the same as making it sound like an advert. */}
+        {!directed && (
+          <label className="knob">
+            <span>Pace</span>
+            <div className="segmented small" role="tablist">
+              {catalog.pace.map((p) => (
+                <button
+                  key={p.value}
+                  className={p.value === tuning.pace ? "seg active" : "seg"}
+                  onClick={() => onChange({ ...tuning, pace: p.value })}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </label>
+        )}
         <label className="knob">
           <span>Master</span>
           <select
@@ -600,6 +854,13 @@ function Tuner({
         <p className="hint muted">
           The read is undirected — the model's own interpretation of your copy — but still
           cleaned and mastered. Choose <strong>Off</strong> above for the raw output.
+          {tuning.pace === "natural"
+            ? " Pace sets the pause between sentences."
+            : tuning.pace === "fast"
+              ? " Fast shortens the pauses and speeds the read by roughly 8%. On a cloned" +
+                " voice it trades a little steadiness — set it back to Natural if the voice wanders."
+              : " Slow widens the pause between sentences. It does not slow the speaking" +
+                " rate itself: the model does not reliably obey that in Khmer."}
         </p>
       )}
     </>
@@ -613,12 +874,97 @@ function ClipFacts({ clip, catalog }: { clip: Clip; catalog: TunerCatalog | null
   const facts = [
     `${clip.durationSec.toFixed(1)}s`,
     `${clip.sampleRate / 1000} kHz`,
+    renderCost(clip),
     style ? style.label : "undirected read",
     master?.label ?? null,
     clip.lufs === null ? "silent" : `${clip.lufs.toFixed(1)} LUFS`,
     clip.peakDb === null ? null : `peak ${clip.peakDb.toFixed(1)} dBTP`,
   ];
   return <>{facts.filter(Boolean).join(" · ")}</>;
+}
+
+/**
+ * What this clip cost to make: wall-clock seconds, and which processor spent
+ * them. The device matters as much as the number — the same script is minutes
+ * on the CPU and under a minute on the GPU, so a bare "92s" reads as a broken
+ * app rather than as the price of running a 2B model on this machine.
+ *
+ * An engine from before this field existed returns nothing for it. That is a
+ * normal case, not an error: the window survives an engine restart, so a clip
+ * generated by the old shape can still be on screen. Missing simply drops the
+ * fact instead of printing "NaNs".
+ */
+function renderCost(clip: Clip): string | null {
+  const seconds = clip.renderSec;
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) return null;
+  const time =
+    seconds >= 60
+      ? `${Math.floor(seconds / 60)}m ${String(Math.round(seconds % 60)).padStart(2, "0")}s`
+      : `${seconds.toFixed(1)}s`;
+  const where = clip.device === "mps" ? "GPU" : clip.device === "cpu" ? "CPU" : "";
+  return where ? `made in ${time} on ${where}` : `made in ${time}`;
+}
+
+/**
+ * What the engine took out of an imported sample, in the terms that matter to
+ * the person: is this voice going to come out clean?
+ *
+ * It reports signal-to-noise rather than "noise removed" because the number
+ * that predicts the clone is what is *left*, not what went. A sample can lose
+ * 20 dB of background and still be too noisy to clone well, and saying only
+ * "20 dB removed" would read as success in exactly the case that needs a
+ * warning. So the band is decided by `snr_after`, and the improvement is
+ * supporting detail.
+ */
+function CleanupNote({ cleanup }: { cleanup: Cleanup }) {
+  if (cleanup.failed) {
+    return (
+      <p className="hint muted">
+        Could not clean this sample ({cleanup.failed}) — it is being used as it arrived, so
+        any background in it will carry into the clone.
+      </p>
+    );
+  }
+
+  const after = cleanup.snr_after;
+  const verdict =
+    after >= 30
+      ? "Clean enough to clone well."
+      : after >= 20
+        ? "Usable, but some background may still come through."
+        : "Still noisy — a quieter recording would clone noticeably better.";
+
+  return (
+    <p className="hint muted">
+      {cleanup.separated
+        ? `Background removed — signal-to-noise ${cleanup.snr_before.toFixed(0)} → ${after.toFixed(0)} dB (+${cleanup.improvement_db.toFixed(0)} dB). `
+        : `Sample was already clean (${after.toFixed(0)} dB signal-to-noise) — levelled only. `}
+      {cleanup.trimmed && "Silence at the ends trimmed. "}
+      {verdict}
+      {cleanup.separation_error && ` ${cleanup.separation_error}`}
+    </p>
+  );
+}
+
+/**
+ * Seconds since `running` became true, ticking about four times a second so
+ * the figure never looks stuck between whole seconds. A generate can take the
+ * better part of a minute, and a button that reads "Generating…" for that long
+ * with nothing moving is indistinguishable from a hang.
+ */
+function useElapsed(running: boolean): number {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    if (!running) return;
+    setSeconds(0);
+    const started = Date.now();
+    const id = window.setInterval(
+      () => setSeconds(Math.round((Date.now() - started) / 1000)),
+      250,
+    );
+    return () => window.clearInterval(id);
+  }, [running]);
+  return seconds;
 }
 
 /** A style's own energy/pace/mastering, so each preset lands coherent. */
@@ -691,6 +1037,8 @@ function SetupCard({
   const [startedAt, setStartedAt] = useState(0);
   const [now, setNow] = useState(() => Date.now());
   const [starting, setStarting] = useState(false);
+  const [options, setOptions] = useState<EngineOptions | null>(null);
+  const [switching, setSwitching] = useState("");
   const logRef = useRef<HTMLPreElement>(null);
 
   const refresh = useCallback(async () => {
@@ -704,6 +1052,31 @@ function SetupCard({
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  const refreshOptions = useCallback(async () => {
+    try {
+      setOptions(await getEngineOptions());
+    } catch {
+      /* the chooser is optional — hide it rather than block setup */
+    }
+  }, []);
+  useEffect(() => {
+    refreshOptions();
+  }, [refreshOptions]);
+
+  async function chooseMode(mode: string) {
+    if (!options || options.mode === mode || switching) return;
+    setFailed("");
+    setSwitching(mode);
+    try {
+      await setEngineMode(mode);
+    } catch (e) {
+      setFailed(messageOf(e));
+    } finally {
+      await refreshOptions();
+      setSwitching("");
+    }
+  }
 
   useEffect(() => {
     const subscriptions = [
@@ -849,6 +1222,33 @@ function SetupCard({
                 ))}
               </ol>
 
+              {options && (
+                <>
+                  <h3 className="sub-head">How it runs</h3>
+                  <div className="chips">
+                    {ENGINE_MODES.map((option) => (
+                      <button
+                        key={option.key}
+                        className={options.mode === option.key ? "chip active" : "chip"}
+                        disabled={!!switching}
+                        onClick={() => chooseMode(option.key)}
+                      >
+                        {switching === option.key ? "Applying…" : option.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="hint muted">
+                    {ENGINE_MODES.find((option) => option.key === options.mode)?.blurb}
+                  </p>
+                  {memoryAdvice(options.memoryGb) && (
+                    <p className="hint muted">{memoryAdvice(options.memoryGb)}</p>
+                  )}
+                  <p className="hint muted">
+                    Changing this restarts the engine, which takes a few seconds.
+                  </p>
+                </>
+              )}
+
               {ready ? (
                 <>
                   <p className="hint note">
@@ -907,6 +1307,44 @@ function SetupCard({
       </div>
     </section>
   );
+}
+
+/**
+ * How the engine may be run. Only matters on a machine where the model does
+ * not fit inside the GPU allocator's ceiling — about 9 GB, which a 16 GB Mac
+ * does not reach.
+ */
+const ENGINE_MODES = [
+  {
+    key: "auto",
+    label: "Automatic",
+    blurb:
+      "Use the GPU when the model fits, and the CPU when it does not. The safe choice.",
+  },
+  {
+    key: "cpu",
+    label: "CPU only",
+    blurb:
+      "Never touch the GPU. Generating takes longer, but it always fits and never competes with anything else for GPU memory.",
+  },
+  {
+    key: "gpu-unlimited",
+    label: "GPU, ignore the limit",
+    blurb:
+      "Run on the GPU past its memory ceiling, letting the system swap to disk. Faster on a 16 GB Mac, but PyTorch warns it may make the machine unresponsive — if that happens, switch back.",
+  },
+];
+
+/** What this machine means for the choice, rather than a guess. */
+function memoryAdvice(gb: number): string {
+  if (!gb) return "";
+  if (gb >= 24) {
+    return `This Mac has ${gb} GB — the model fits on the GPU, so Automatic will use it.`;
+  }
+  if (gb <= 16) {
+    return `This Mac has ${gb} GB. The model needs about 9 GB and the GPU's own ceiling sits near that, so Automatic will run it on the CPU here.`;
+  }
+  return `This Mac has ${gb} GB, which is borderline: Automatic will use the GPU if the model fits and fall back if it does not.`;
 }
 
 function elapsedLabel(seconds: number): string {

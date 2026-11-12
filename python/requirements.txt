@@ -15,3 +15,9 @@ librosa>=0.10
 fastapi>=0.115
 uvicorn>=0.30
 python-multipart>=0.0.12
+
+# Voice separation for imported cloning samples. The model clones the whole
+# sound of the reference, so music or a noisy room behind the speaker ends up
+# under every sentence it later says. Demucs pulls the voice out of that mix.
+# Small package; its 80 MB model is fetched on the first clone, not at install.
+demucs>=4.1

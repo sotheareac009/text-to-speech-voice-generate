@@ -21,7 +21,12 @@ export interface Clip {
   /** Where the engine wrote the WAV. */
   path: string;
   sampleRate: number;
+  /** Length of the speech itself, in seconds. */
   durationSec: number;
+  /** Wall-clock seconds the engine spent making this clip. */
+  renderSec: number;
+  /** "mps" or "cpu" — what actually ran it, which is why it took that long. */
+  device: string;
   /** Preset used, or "none" when the tuner was off. */
   style: string;
   /** The exact control instruction the model was given. */
@@ -70,6 +75,8 @@ export interface BuiltinVoice {
   group: string;
   /** Short name for the variant dropdown, where the group is on the button. */
   variant: string;
+  /** True for one of the person's own cloned voices, kept on this machine. */
+  saved?: boolean;
 }
 
 export interface TunerCatalog {
@@ -115,18 +122,76 @@ export async function getHealth(): Promise<Health> {
   return res.json();
 }
 
+/** What the engine did to a sample on the way in. */
+export interface Cleanup {
+  /** Signal-to-noise before and after, in dB. */
+  snr_before: number;
+  snr_after: number;
+  floor_before: number;
+  floor_after: number;
+  duration_before: number;
+  duration_after: number;
+  improvement_db: number;
+  /** Whether the voice was actually separated from the background. */
+  separated: boolean;
+  trimmed: boolean;
+  /** Set when separation was wanted but unavailable. */
+  separation_error: string;
+  seconds: number;
+  /** Present instead of the rest when cleanup failed outright. */
+  failed?: string;
+}
+
+export interface RegisteredVoice {
+  voiceId: string;
+  /** Null when cleaning was switched off, or the engine predates it. */
+  cleanup: Cleanup | null;
+  /** The name it was saved under, so it can be shown and renamed. */
+  name: string;
+}
+
 /**
  * Upload a voice sample to clone. `transcript` is optional: when it really
  * matches what the clip says, the clone comes out noticeably closer.
+ *
+ * The engine strips background from the sample before using it. That is on
+ * by default because the model clones the *sound* of the reference, not only
+ * the speaker — a clip recorded over music gives a voice with music under
+ * everything it later says.
  */
-export async function registerVoice(sample: File, transcript = ""): Promise<string> {
+export async function registerVoice(
+  sample: File,
+  transcript = "",
+  clean = true,
+  name = "",
+): Promise<RegisteredVoice> {
   const form = new FormData();
   form.append("sample", sample);
   if (transcript.trim()) form.append("transcript", transcript.trim());
+  form.append("clean", clean ? "true" : "false");
+  if (name.trim()) form.append("name", name.trim());
   const res = await fetch(`${BASE}/voices`, { method: "POST", body: form });
   if (!res.ok) throw new Error(await errorText(res));
-  const data = (await res.json()) as { voice_id: string };
-  return data.voice_id;
+  const data = (await res.json()) as {
+    voice_id: string;
+    cleanup?: Cleanup | null;
+    name?: string;
+  };
+  return { voiceId: data.voice_id, cleanup: data.cleanup ?? null, name: data.name ?? "" };
+}
+
+/** Rename one of the saved clones. */
+export async function renameVoice(voiceId: string, name: string): Promise<void> {
+  const form = new FormData();
+  form.append("name", name);
+  const res = await fetch(`${BASE}/voices/${voiceId}`, { method: "PATCH", body: form });
+  if (!res.ok) throw new Error(await errorText(res));
+}
+
+/** Forget a saved clone and delete its recording. */
+export async function forgetVoice(voiceId: string): Promise<void> {
+  const res = await fetch(`${BASE}/voices/${voiceId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await errorText(res));
 }
 
 /**
@@ -161,6 +226,8 @@ export async function synthesize(
     path: string;
     sample_rate: number;
     duration: number;
+    render_seconds: number;
+    device: string;
     style: string;
     instruction: string;
     mastering: string;
@@ -174,6 +241,8 @@ export async function synthesize(
     path: data.path,
     sampleRate: data.sample_rate,
     durationSec: data.duration,
+    renderSec: data.render_seconds,
+    device: data.device,
     style: data.style,
     instruction: data.instruction,
     mastering: data.mastering,
@@ -188,6 +257,44 @@ export async function fetchClip(clip: Clip): Promise<Blob> {
   const res = await fetch(clip.url);
   if (!res.ok) throw new Error(await errorText(res));
   return res.blob();
+}
+
+// ──────────────────────────── sharing to chat apps ────────────────────────
+
+/** Where a clip can be sent. The engine owns the encoding for each one. */
+export type ShareTarget = "telegram" | "messenger";
+
+/** A clip re-encoded for one chat app. */
+export interface Export {
+  target: ShareTarget;
+  label: string;
+  /** What the format is and why, straight from the engine. */
+  note: string;
+  /** "ogg", "m4a" or "mp3" — the fallback encoder changes the container. */
+  format: string;
+  /** "ffmpeg" or "libsndfile"; the UI says so when the format is not the ideal one. */
+  encoder: string;
+  /** Absolute path on disk, for revealing the file in Finder. */
+  path: string;
+  /** Absolute http:// URL, for the browser download fallback. */
+  url: string;
+  bytes: number;
+}
+
+/**
+ * Re-encode a clip for a chat app.
+ *
+ * Telegram only draws the voice-message bubble for OGG/Opus, so sending the
+ * WAV would arrive as a file attachment instead. The engine caches the result
+ * next to the clip, so re-sharing the same take is instant.
+ */
+export async function exportFor(clip: Clip, target: ShareTarget): Promise<Export> {
+  const form = new FormData();
+  form.append("target", target);
+  const res = await fetch(`${BASE}/export/${clip.id}`, { method: "POST", body: form });
+  if (!res.ok) throw new Error(await errorText(res));
+  const data = (await res.json()) as Export;
+  return { ...data, url: `${BASE}${data.url}` };
 }
 
 async function errorText(res: Response): Promise<string> {

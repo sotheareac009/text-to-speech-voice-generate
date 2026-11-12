@@ -26,9 +26,12 @@ import os
 import re
 import sys
 import threading
+import time
 import traceback
 import uuid
 from pathlib import Path
+
+from starlette.concurrency import run_in_threadpool
 
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
@@ -77,15 +80,20 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import FileResponse, JSONResponse  # noqa: E402
 
+import saved_voices  # noqa: E402
+from denoise import clean_sample  # noqa: E402
 from khmer_normalize import normalize_for_speech  # noqa: E402
 from longform import generate_long  # noqa: E402
 from mastering import CLEANUP_DEFAULT, master  # noqa: E402
+from share import EXPORT_SUFFIXES, TARGETS, export  # noqa: E402
 from styles import build_direction, plain_direction, tuner_catalog  # noqa: E402
 from voices import BUILTIN_VOICES, SEED_TEXT, designed_voice, voice_catalog  # noqa: E402
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("VOICE_PORT", "8008"))
 MODEL_ID = os.environ.get("VOICE_MODEL", "openbmb/VoxCPM2")
+#: "mps", "cpu", or empty to choose automatically.
+DEVICE = os.environ.get("VOICE_DEVICE", "").strip().lower()
 
 DATA_DIR = Path(os.environ.get("VOICE_DATA_DIR", Path(__file__).parent / "data"))
 VOICES_DIR = DATA_DIR / "voices"
@@ -102,6 +110,8 @@ _ID_RE = re.compile(r"[0-9a-f]{32}")
 _model = None
 _status = "loading"      # loading | ready | error
 _error_detail = ""
+#: Which device the model actually ended up on, once it has loaded.
+_device = ""
 #: Why loading is taking so long, in words the UI can show. On a machine that
 #: has never run this model, startup is a ~5 GB download, and a progress-free
 #: "Starting engine…" for ten minutes looks indistinguishable from a hang.
@@ -109,6 +119,22 @@ _notice = ""
 _voice_paths: dict[str, Path] = {}      # voice_id -> uploaded sample
 _voice_prompts: dict[str, str] = {}     # voice_id -> transcript of that sample
 _design_lock = threading.Lock()
+
+
+def _restore_saved_voices() -> None:
+    """Put previously saved clones back into the lookup tables.
+
+    Without this the index would list a voice the picker could show but /tts
+    could not find, which is a worse failure than not listing it: the person
+    clicks their own voice and is told it does not exist.
+    """
+    for voice in saved_voices.load(DATA_DIR):
+        _voice_paths[voice.id] = Path(voice.file)
+        if voice.transcript:
+            _voice_prompts[voice.id] = voice.transcript
+
+
+_restore_saved_voices()
 
 
 def _model_is_cached() -> bool:
@@ -122,27 +148,98 @@ def _model_is_cached() -> bool:
     return (hub / ("models--" + MODEL_ID.replace("/", "--"))).exists()
 
 
-def _load_model() -> None:
-    global _model, _status, _error_detail, _notice
+def _devices_to_try() -> list[str]:
+    """Devices to attempt, best first.
+
+    The GPU is far faster, but VoxCPM2 is a 2B-parameter model that loads in
+    float32 — around 9 GB. The MPS allocator's ceiling is a fraction of the
+    machine's memory, and on a 16 GB Mac that works out at about 9 GB, so the
+    load dies partway through with "MPS backend out of memory". The CPU has no
+    such ceiling, so it is a fallback rather than a failure: slower, but it
+    runs. A machine with more memory never reaches the fallback.
+    """
+    if DEVICE in {"cpu", "mps"}:
+        return [DEVICE]
     try:
-        if _model_is_cached():
-            _notice = "Loading the voice model…"
-        else:
-            _notice = (
-                "First run: downloading the voice model (about 5 GB). "
-                "This happens once — later launches take seconds."
-            )
+        import torch
+        if torch.backends.mps.is_available():
+            return ["mps", "cpu"]
+    except Exception:  # noqa: BLE001
+        pass
+    return ["cpu"]
+
+
+def _release_memory() -> None:
+    """Hand back whatever a failed load managed to allocate."""
+    try:
+        import gc
+        import torch
+        gc.collect()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _out_of_memory(exc: BaseException) -> bool:
+    return "out of memory" in str(exc).lower()
+
+
+def _load_model() -> None:
+    global _model, _status, _error_detail, _notice, _device
+    if _model_is_cached():
+        _notice = "Loading the voice model…"
+    else:
+        _notice = (
+            "First run: downloading the voice model (about 5 GB). "
+            "This happens once — later launches take seconds."
+        )
+
+    try:
         from voxcpm import VoxCPM
-        print(f"[engine] loading {MODEL_ID} — {_notice}", flush=True)
-        _model = VoxCPM.from_pretrained(MODEL_ID, load_denoiser=False)
-        _status = "ready"
-        _notice = ""
-        print("[engine] ready", flush=True)
     except Exception as exc:  # noqa: BLE001
         _status = "error"
         _error_detail = f"{type(exc).__name__}: {exc}"
         _notice = ""
-        print("[engine] model failed to load:\n" + traceback.format_exc(), flush=True)
+        print("[engine] voxcpm failed to import:\n" + traceback.format_exc(), flush=True)
+        return
+
+    candidates = _devices_to_try()
+    failure: BaseException | None = None
+    for index, device in enumerate(candidates):
+        last = index + 1 >= len(candidates)
+        try:
+            print(f"[engine] loading {MODEL_ID} on {device} — {_notice}", flush=True)
+            _model = VoxCPM.from_pretrained(MODEL_ID, load_denoiser=False, device=device)
+            _device = device
+            _status = "ready"
+            # Say so permanently when the GPU could not be used: it is the
+            # difference between roughly 2x realtime and something far slower,
+            # and the user should not have to wonder why it feels sluggish.
+            _notice = (
+                ""
+                if device != "cpu" or candidates == ["cpu"]
+                else "Not enough GPU memory for the voice model, so it is running on the "
+                "CPU. Everything works, but generating takes longer."
+            )
+            print(f"[engine] ready on {device}", flush=True)
+            return
+        except Exception as exc:  # noqa: BLE001
+            failure = exc
+            _model = None
+            print(
+                f"[engine] loading on {device} failed:\n" + traceback.format_exc(),
+                flush=True,
+            )
+            _release_memory()
+            if _out_of_memory(exc) and not last:
+                print("[engine] out of GPU memory — retrying on the CPU", flush=True)
+                continue
+            break
+
+    _status = "error"
+    _error_detail = f"{type(failure).__name__}: {failure}"
+    _notice = ""
 
 
 app = FastAPI(title="Voice Engine")
@@ -160,18 +257,24 @@ def _startup() -> None:
 def tuner() -> JSONResponse:
     """The built-in voices and the tuner's presets, so the UI doesn't hard-code
     them and can't drift from what the engine actually does."""
-    return JSONResponse({**tuner_catalog(), "voices": voice_catalog()})
+    # Built-ins first, then the person's own clones. Theirs come second
+    # because the built-ins are what a new install can use immediately.
+    voices = voice_catalog() + saved_voices.catalog(DATA_DIR)
+    return JSONResponse({**tuner_catalog(), "voices": voices})
 
 
 @app.get("/health")
 def health() -> JSONResponse:
-    device = ""
-    try:
-        import torch
-        device = "mps" if torch.backends.mps.is_available() else (
-            "cuda" if torch.cuda.is_available() else "cpu")
-    except Exception:  # noqa: BLE001
-        pass
+    # Once loaded, report where the model actually is rather than what the
+    # machine is capable of — those differ whenever the fallback was taken.
+    device = _device
+    if not device:
+        try:
+            import torch
+            device = "mps" if torch.backends.mps.is_available() else (
+                "cuda" if torch.cuda.is_available() else "cpu")
+        except Exception:  # noqa: BLE001
+            pass
     return JSONResponse(
         {
             "status": _status,
@@ -187,9 +290,25 @@ def health() -> JSONResponse:
 async def register_voice(
     sample: UploadFile = File(...),
     transcript: str = Form(""),
+    clean: bool = Form(True),
+    name: str = Form(""),
 ) -> JSONResponse:
-    """Save a voice sample to clone from. `transcript` is optional but, when the
-    text really matches the clip, it makes the clone noticeably closer."""
+    """Save a voice sample to clone from, cleaned of background by default.
+
+    `transcript` is optional but, when the text really matches the clip, it
+    makes the clone noticeably closer.
+
+    `clean` runs the sample through `denoise.clean_sample` first. It is on by
+    default because the model clones the whole sound of the reference, not
+    only the speaker: a sample recorded over traffic produces a voice with
+    traffic under every sentence it later speaks. Measured on a real 26 s
+    phone recording, cleaning the reference took the *generated* speech from a
+    -17.1 dB noise floor to -43.5 dB.
+
+    The original upload is always kept beside the cleaned version. Cleaning is
+    a lossy judgement call, and someone who dislikes the result needs the file
+    they actually sent to still be there.
+    """
     raw = await sample.read()
     if not raw:
         raise HTTPException(status_code=400, detail="Empty file.")
@@ -202,10 +321,66 @@ async def register_voice(
     voice_id = uuid.uuid4().hex
     path = VOICES_DIR / f"{voice_id}{ext}"
     path.write_bytes(raw)
+
+    report: dict | None = None
+    if clean:
+        cleaned = VOICES_DIR / f"{voice_id}.clean.wav"
+        try:
+            # Off the event loop. Separation is tens of seconds of CPU work,
+            # and this endpoint is `async`, so running it inline would stall
+            # every other request for the duration — including the /health
+            # poll the interface uses to draw the engine badge. `/tts` gets
+            # this for free by being a sync `def`, which FastAPI already
+            # hands to a worker thread.
+            result = await run_in_threadpool(clean_sample, path, cleaned)
+            report = result.as_dict()
+            path = cleaned
+            print(
+                f"[engine] cleaned voice sample: SNR {result.snr_before} -> "
+                f"{result.snr_after} dB (+{result.improvement_db}) in {result.seconds}s"
+                + (f" | {result.separation_error}" if result.separation_error else ""),
+                flush=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Never lose an upload over the cleanup step: fall back to the
+            # original file, which is exactly what the app did before this
+            # existed, and tell the interface why it is not cleaned.
+            print("[engine] voice cleanup failed:\n" + traceback.format_exc(), flush=True)
+            report = {"failed": str(exc)}
+
     _voice_paths[voice_id] = path
     if transcript.strip():
         _voice_prompts[voice_id] = transcript.strip()
-    return JSONResponse({"voice_id": voice_id})
+
+    # Keep it. A clone someone recorded, cleaned and checked should still be
+    # there tomorrow, under a name they recognise — not something they have to
+    # upload again every session. `path` is the cleaned file when cleaning ran,
+    # which is the one that should be cloned from later as well.
+    saved = saved_voices.add(
+        DATA_DIR,
+        voice_id,
+        name or Path(sample.filename or "").stem or "",
+        path,
+        transcript,
+    )
+    return JSONResponse({"voice_id": voice_id, "cleanup": report, "name": saved.name})
+
+
+@app.patch("/voices/{voice_id}")
+def rename_voice(voice_id: str, name: str = Form(...)) -> JSONResponse:
+    if not saved_voices.rename(DATA_DIR, voice_id, name):
+        raise HTTPException(status_code=404, detail="No such saved voice.")
+    return JSONResponse({"ok": True, "name": name.strip()})
+
+
+@app.delete("/voices/{voice_id}")
+def forget_voice(voice_id: str) -> JSONResponse:
+    """Forget a saved voice and delete its recording."""
+    if not saved_voices.remove(DATA_DIR, voice_id):
+        raise HTTPException(status_code=404, detail="No such saved voice.")
+    _voice_paths.pop(voice_id, None)
+    _voice_prompts.pop(voice_id, None)
+    return JSONResponse({"ok": True})
 
 
 def _finite(value) -> float | None:
@@ -222,23 +397,78 @@ def _prune_results(keep: int | None = None) -> None:
     keep = KEEP_RESULTS if keep is None else keep
     clips = sorted(OUT_DIR.glob("*.wav"), key=lambda p: p.stat().st_mtime, reverse=True)
     for stale in clips[keep:]:
-        try:
-            stale.unlink()
-        except OSError:
-            pass
+        # Drop the chat-app exports built from this clip too, or they outlive
+        # the WAV and the directory fills up with orphans.
+        for suffix in (".wav", *EXPORT_SUFFIXES):
+            try:
+                stale.with_suffix(suffix).unlink()
+            except OSError:
+                pass
+
+
+MEDIA_TYPES = {
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+    ".m4a": "audio/mp4",
+    ".mp3": "audio/mpeg",
+}
 
 
 @app.get("/audio/{name}")
 def get_audio(name: str) -> FileResponse:
-    """Serve a generated clip. Range requests are handled by FileResponse, which
-    the webview's audio element relies on for playback and seeking."""
-    stem = Path(name).stem
-    if not _ID_RE.fullmatch(stem):
+    """Serve a generated clip, or one of the chat-app exports built from it.
+
+    Range requests are handled by FileResponse, which the webview's audio
+    element relies on for playback and seeking."""
+    requested = Path(name)
+    stem = requested.stem
+    suffix = requested.suffix.lower() or ".wav"
+    if not _ID_RE.fullmatch(stem) or suffix not in MEDIA_TYPES:
         raise HTTPException(status_code=404, detail="No such clip.")
-    path = OUT_DIR / f"{stem}.wav"
+    path = OUT_DIR / f"{stem}{suffix}"
     if not path.exists():
         raise HTTPException(status_code=404, detail="That clip is gone — generate it again.")
-    return FileResponse(path, media_type="audio/wav")
+    return FileResponse(path, media_type=MEDIA_TYPES[suffix])
+
+
+@app.post("/export/{audio_id}")
+def export_clip(audio_id: str, target: str = Form(...)) -> JSONResponse:
+    """Re-encode a finished clip for a chat app.
+
+    Telegram treats only OGG/Opus as voice, so sharing the WAV would arrive as a
+    file attachment. The result is cached next to the clip: re-sharing the same
+    take costs nothing. See `share.py` for what each target wants.
+    """
+    if not _ID_RE.fullmatch(audio_id):
+        raise HTTPException(status_code=404, detail="No such clip.")
+    if target not in TARGETS:
+        raise HTTPException(status_code=400, detail=f"Unknown share target {target!r}.")
+
+    source = OUT_DIR / f"{audio_id}.wav"
+    if not source.exists():
+        raise HTTPException(status_code=404, detail="That clip is gone — generate it again.")
+
+    try:
+        path, spec, encoder = export(source, target)
+    except Exception as exc:  # noqa: BLE001
+        print("[engine] export failed:\n" + traceback.format_exc(), flush=True)
+        raise HTTPException(
+            status_code=500, detail=f"Could not encode for {target}: {exc}"
+        ) from exc
+
+    return JSONResponse(
+        {
+            "id": audio_id,
+            "target": spec.key,
+            "label": spec.label,
+            "note": spec.note,
+            "format": path.suffix.lstrip("."),
+            "encoder": encoder,
+            "path": str(path),
+            "url": f"/audio/{path.name}",
+            "bytes": path.stat().st_size,
+        }
+    )
 
 
 @app.post("/tts")
@@ -282,13 +512,20 @@ def synthesize(
     if style and style != "none":
         direction = build_direction(style, energy, pace, mastering or None)
     else:
-        direction = plain_direction(mastering or CLEANUP_DEFAULT)
+        direction = plain_direction(mastering or CLEANUP_DEFAULT, pace)
     print(
         f"[engine] {len(text)} chars · voice={voice} · style={direction.style} "
         f"· cfg={direction.cfg_value} · master={direction.mastering}",
         flush=True,
     )
 
+    # Wall-clock cost of this read. Measured around synthesis *and* mastering,
+    # because that is the whole wait the person sits through after pressing
+    # Generate — splitting it would report a number smaller than their
+    # experience. The device is reported alongside it: 50 s means something
+    # very different on the GPU than on the CPU, and without it the figure
+    # invites the wrong conclusion about the machine.
+    started = time.perf_counter()
     try:
         audio, sample_rate = generate_long(
             _model,
@@ -304,6 +541,17 @@ def synthesize(
         print("[engine] synthesis failed:\n" + traceback.format_exc(), flush=True)
         raise HTTPException(status_code=500, detail=f"Synthesis failed: {exc}")
 
+    render_seconds = time.perf_counter() - started
+    spoken_seconds = len(audio) / float(sample_rate)
+    print(
+        f"[engine] rendered {spoken_seconds:.1f}s of speech in "
+        f"{render_seconds:.1f}s on {_device or 'unknown'} "
+        # Spelled out rather than given as "Nx realtime": that phrase is read
+        # both ways round, and here the engine is always the slow side of it.
+        f"({render_seconds / spoken_seconds:.1f}x the length of the audio)",
+        flush=True,
+    )
+
     audio_id = uuid.uuid4().hex
     out_path = OUT_DIR / f"{audio_id}.wav"
     sf.write(out_path, audio, sample_rate, format="WAV", subtype="PCM_16")
@@ -315,7 +563,9 @@ def synthesize(
             "url": f"/audio/{audio_id}.wav",
             "path": str(out_path),
             "sample_rate": int(sample_rate),
-            "duration": round(len(audio) / float(sample_rate), 2),
+            "duration": round(spoken_seconds, 2),
+            "render_seconds": round(render_seconds, 1),
+            "device": _device,
             "style": direction.style,
             "instruction": direction.instruction,
             "mastering": direction.mastering,

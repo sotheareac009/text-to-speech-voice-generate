@@ -103,6 +103,73 @@ BUILTIN_VOICES: dict[str, BuiltinVoice] = {
         group="Male",
         variant="Young (23)",
     ),
+    # Five more male characters. Each one names an age and a manner and then
+    # stops. That restraint is the lesson from the first two: piling on
+    # adjectives does not sharpen a voice, it blurs it, and tonal wording is
+    # the worst offender — "deep, rich chest tone" dragged a take down to a
+    # 74-87 Hz boom with the sub-100 Hz band louder than its own formants.
+    # The f0 ranges are kept apart on purpose so seven male voices stay seven
+    # distinguishable voices rather than collapsing into one register.
+    "male_authority": BuiltinVoice(
+        key="male_authority",
+        label="Authority",
+        blurb="Older, measured and certain. Documentary, corporate, news.",
+        describe=(
+            "A premium leading male voice, a man in his late forties, measured and "
+            "certain, authoritative documentary narrator, deliberate and unhurried"
+        ),
+        f0_range=(80.0, 130.0),
+        group="Male",
+        variant="Authority (late 40s)",
+    ),
+    "male_gentle": BuiltinVoice(
+        key="male_gentle",
+        label="Gentle",
+        blurb="Soft-spoken and kind. Bedtime stories, health, anything delicate.",
+        describe=(
+            "A premium leading male voice, a man in his thirties, soft-spoken and "
+            "kind, gentle storyteller, quiet and unhurried"
+        ),
+        f0_range=(100.0, 155.0),
+        group="Male",
+        variant="Gentle (30s)",
+    ),
+    "male_bright": BuiltinVoice(
+        key="male_bright",
+        label="Bright",
+        blurb="Quick, upbeat and smiling. Ads, social clips, product demos.",
+        describe=(
+            "A premium leading male voice, a young man of about twenty-six, bright "
+            "and energetic, upbeat presenter, quick and smiling"
+        ),
+        f0_range=(125.0, 190.0),
+        group="Male",
+        variant="Bright (26)",
+    ),
+    "male_rough": BuiltinVoice(
+        key="male_rough",
+        label="Rough",
+        blurb="Textured and lived-in. Characters, drama, street-level stories.",
+        describe=(
+            "A premium leading male voice, a man in his forties, textured and "
+            "lived-in, weathered character voice, plain and direct"
+        ),
+        f0_range=(85.0, 135.0),
+        group="Male",
+        variant="Rough (40s)",
+    ),
+    "male_elder": BuiltinVoice(
+        key="male_elder",
+        label="Elder",
+        blurb="An older man telling it slowly. Folk tales, memory, tradition.",
+        describe=(
+            "A premium leading male voice, a man of about sixty-five, calm and "
+            "reflective, elder telling a story, slow and even"
+        ),
+        f0_range=(95.0, 145.0),
+        group="Male",
+        variant="Elder (65)",
+    ),
 }
 
 #: Nobody ever hears this — it is phonetic material for the design pass, so it

@@ -66,6 +66,24 @@ export async function installEnvironment(): Promise<void> {
   await invoke("install_environment");
 }
 
+/** How the engine should run, and what this machine can manage. */
+export interface EngineOptions {
+  /** "auto" | "cpu" | "gpu-unlimited". */
+  mode: string;
+  /** Physical memory in whole GB; 0 if it could not be read. */
+  memoryGb: number;
+  gpu: boolean;
+}
+
+export async function getEngineOptions(): Promise<EngineOptions> {
+  return invoke<EngineOptions>("engine_options");
+}
+
+/** Save the mode and restart the engine, since it applies at startup. */
+export async function setEngineMode(mode: string): Promise<void> {
+  await invoke("set_engine_mode", { mode });
+}
+
 /** Install one library. `requirement` must be a line from the engine's own list. */
 export async function installPackage(requirement: string): Promise<void> {
   await invoke("install_package", { requirement });

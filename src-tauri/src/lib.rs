@@ -186,6 +186,105 @@ fn find_python() -> Option<(PathBuf, String)> {
     None
 }
 
+// ─────────────────────────── how it runs ─────────────────────────────────
+
+/// The ways the engine can be run. The choice matters on a 16 GB machine,
+/// where the model does not fit inside the GPU allocator's ceiling.
+const MODES: [&str; 3] = ["auto", "cpu", "gpu-unlimited"];
+
+fn settings_path(layout: &Layout) -> PathBuf {
+    layout.data.join("settings.json")
+}
+
+/// The saved mode, defaulting to "auto". An unreadable or unknown value is
+/// treated as "auto" rather than an error: the engine should still start.
+fn read_mode(layout: &Layout) -> String {
+    let saved = std::fs::read_to_string(settings_path(layout))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value["mode"].as_str().map(str::to_owned));
+    match saved {
+        Some(mode) if MODES.contains(&mode.as_str()) => mode,
+        _ => "auto".to_owned(),
+    }
+}
+
+fn write_mode(layout: &Layout, mode: &str) -> Result<(), String> {
+    std::fs::create_dir_all(&layout.data)
+        .map_err(|err| format!("{}: {err}", layout.data.display()))?;
+    let path = settings_path(layout);
+    std::fs::write(&path, serde_json::json!({ "mode": mode }).to_string())
+        .map_err(|err| format!("{}: {err}", path.display()))
+}
+
+/// Physical memory in whole GB, so the interface can advise instead of guess.
+fn total_memory_gb() -> u64 {
+    Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .map(|bytes| bytes / 1_073_741_824)
+        .unwrap_or(0)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EngineOptions {
+    mode: String,
+    memory_gb: u64,
+    /// Whether a Metal GPU is plausibly available at all.
+    gpu: bool,
+}
+
+#[tauri::command]
+fn engine_options(app: AppHandle) -> EngineOptions {
+    EngineOptions {
+        mode: read_mode(&layout(&app)),
+        memory_gb: total_memory_gb(),
+        gpu: std::env::consts::ARCH == "aarch64",
+    }
+}
+
+/// Save the mode and restart the engine, since it is applied at startup.
+#[tauri::command]
+fn set_engine_mode(app: AppHandle, mode: String) -> Result<(), String> {
+    if !MODES.contains(&mode.as_str()) {
+        return Err(format!("{mode} is not an engine mode."));
+    }
+    let layout = layout(&app);
+    write_mode(&layout, &mode)?;
+    if !layout.installed() {
+        return Ok(()); // nothing to restart yet
+    }
+
+    let owned = app.state::<Engine>().0.lock().unwrap().is_some();
+    stop_engine(app.state::<Engine>());
+    if !owned && engine_already_up() {
+        return Err(
+            "Saved, but the engine running now was not started by this app, so it could not be \
+             restarted. Quit whatever started it and reopen Voice Studio."
+                .into(),
+        );
+    }
+
+    // The old process has to release the port before the new one can bind it.
+    for _ in 0..30 {
+        if !engine_already_up() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    match spawn_engine(&app) {
+        Some(child) => {
+            *app.state::<Engine>().0.lock().unwrap() = Some(child);
+            Ok(())
+        }
+        None => Err("Saved, but the engine could not be restarted.".into()),
+    }
+}
+
 // ──────────────────────────── engine state ───────────────────────────────
 
 #[derive(Serialize)]
@@ -694,7 +793,26 @@ fn spawn_engine(app: &AppHandle) -> Option<Child> {
         Err(_) => (Stdio::null(), Stdio::null()),
     };
 
-    match Command::new(&python)
+    let mode = read_mode(&layout);
+    let mut command = Command::new(&python);
+    match mode.as_str() {
+        "cpu" => {
+            command.env("VOICE_DEVICE", "cpu");
+        }
+        "gpu-unlimited" => {
+            // Removes the MPS allocator's ceiling so a 16 GB machine can load
+            // the model on the GPU, spilling into swap rather than refusing.
+            // Both ratios must be set: leaving the low one at its 1.4 default
+            // while the high one is 0.0 is rejected as an invalid pair.
+            command.env("VOICE_DEVICE", "mps");
+            command.env("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0");
+            command.env("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.0");
+        }
+        _ => {}
+    }
+    println!("[tauri] starting the engine in {mode} mode");
+
+    match command
         .arg(&script)
         .stdout(out)
         .stderr(err)
@@ -751,6 +869,209 @@ fn stop_engine(engine: State<Engine>) {
     }
 }
 
+// ────────────────────────────── chat apps ────────────────────────────────
+
+/// The desktop apps a clip can be handed to, newest bundle id first.
+///
+/// Telegram ships two different macOS builds with different ids — the
+/// Mac App Store one and the `tdesktop` one — and Messenger's desktop app is
+/// a Catalyst wrapper. Whichever is installed, we want that, and the web
+/// client only when none is.
+fn chat_app(target: &str) -> Option<(&'static [&'static str], &'static str)> {
+    match target {
+        "telegram" => Some((
+            &["com.tdesktop.Telegram", "ru.keepcoder.Telegram"],
+            "https://web.telegram.org/",
+        )),
+        "messenger" => Some((
+            &["com.facebook.Messenger", "com.facebook.archon"],
+            "https://www.messenger.com/",
+        )),
+        _ => None,
+    }
+}
+
+/// Put a file on the clipboard the way Finder's ⌘C does, as a file reference
+/// rather than its bytes, so pasting into a chat attaches the file.
+///
+/// This is what makes the share buttons worth pressing: the alternative is
+/// revealing the file and leaving the user to drag it between two windows.
+#[cfg(target_os = "macos")]
+fn put_file_on_clipboard(path: &Path) -> Result<(), String> {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{NSPasteboard, NSPasteboardWriting};
+    use objc2_foundation::{NSArray, NSString, NSURL};
+
+    let text = NSString::from_str(&path.to_string_lossy());
+    let url = NSURL::fileURLWithPath(&text);
+    let writer: &ProtocolObject<dyn NSPasteboardWriting> = ProtocolObject::from_ref(&*url);
+    let items = NSArray::from_slice(&[writer]);
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    pasteboard.clearContents();
+    if pasteboard.writeObjects(&items) {
+        Ok(())
+    } else {
+        Err("The clipboard refused the file.".into())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn put_file_on_clipboard(_path: &Path) -> Result<(), String> {
+    Err("Copying a file to the clipboard is only implemented for macOS.".into())
+}
+
+/// What a finished clip can be saved as: the engine's own WAV, and the
+/// chat-app exports `share.py` builds beside it. Returns the name to offer in
+/// the save panel and the label for its file-type filter.
+///
+/// This doubles as the allow-list for every extension that reaches the file
+/// system from the webview, so adding a format here is the only place it has
+/// to be added.
+fn save_spec(ext: &str) -> Option<(&'static str, &'static str)> {
+    match ext {
+        "wav" => Some(("speech.wav", "WAV audio")),
+        // Named `voice` rather than `speech`: this is the file someone attaches
+        // in Telegram, and that is the word on the bubble it becomes.
+        "ogg" => Some(("voice.ogg", "OGG/Opus voice message")),
+        "m4a" => Some(("voice.m4a", "AAC audio")),
+        "mp3" => Some(("voice.mp3", "MP3 audio")),
+        _ => None,
+    }
+}
+
+/// A clip id, checked before it is ever interpolated into a path: the engine
+/// makes them with `uuid4().hex`, so 32 hex characters and nothing else.
+fn clip_id(id: &str) -> Result<&str, String> {
+    if id.len() == 32 && id.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(id)
+    } else {
+        Err("Bad clip id.".into())
+    }
+}
+
+/// The file behind a clip, in whichever engine's clip directory it was written.
+///
+/// Our data directory is tried first, and `reported` — the absolute path the
+/// engine put in its own response — second. The second case is needed because
+/// our data directory is not always the engine's: the app only *usually*
+/// starts the engine. When something is already listening on the port — a
+/// leftover `tauri dev` engine, a second copy of the app, one started by hand
+/// — the webview talks to that engine quite happily and the clip is written
+/// into *its* data directory. Looking only in ours then refused to save a clip
+/// that was on disk and playing at that moment, which is exactly what
+/// happened here: an orphaned dev engine held the port with its data in the
+/// repo while the installed app looked under Application Support.
+///
+/// The path arrives from the webview, so it is checked rather than trusted.
+/// The name must be the clip id that was already validated plus the extension
+/// asked for, and it must sit in a directory called `out`. The worst a wrong
+/// or tampered path can therefore name is a file the engine itself writes.
+fn clip_file(
+    app: &AppHandle,
+    id: &str,
+    ext: &str,
+    reported: Option<&str>,
+) -> Result<PathBuf, String> {
+    let name = format!("{id}.{ext}");
+    let ours = layout(app).data.join("out").join(&name);
+    if ours.is_file() {
+        return Ok(ours);
+    }
+
+    let theirs = PathBuf::from(reported.unwrap_or_default());
+    if names_a_clip(&theirs, &name) && theirs.is_file() {
+        return Ok(theirs);
+    }
+
+    Err("That clip is no longer on disk — generate it again.".into())
+}
+
+/// Could the engine have written this path for this clip?
+///
+/// Pure, so the rule can be tested without an app handle — see the tests at
+/// the bottom of this file. Note that a `..` anywhere cannot help: it changes
+/// the last two components, which are the two being checked.
+fn names_a_clip(path: &Path, name: &str) -> bool {
+    path.file_name().and_then(|n| n.to_str()) == Some(name)
+        && path.parent().and_then(Path::file_name).and_then(|n| n.to_str()) == Some("out")
+}
+
+/// Put an exported clip on the clipboard, ready to paste into a chat.
+///
+/// Separate from raising the app on purpose: raising it covers our own window,
+/// so the interface needs to paint "press ⌘V" *before* that happens, and it
+/// can only say so truthfully once this has returned.
+///
+/// Deliberately not `async`: Tauri runs an async command on a worker thread,
+/// and `NSPasteboard` is AppKit. A sync command runs on the main thread, which
+/// is where this belongs. Nothing here blocks for longer than a pasteboard
+/// write, so holding that thread is free.
+#[tauri::command]
+fn copy_clip_to_clipboard(
+    app: AppHandle,
+    audio_id: String,
+    path: String,
+) -> Result<bool, String> {
+    let id = clip_id(&audio_id)?;
+    // The container depends on which encoder the engine had, so it is read off
+    // the path rather than assumed — but only the formats the engine writes.
+    let ext = Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if save_spec(&ext).is_none() {
+        return Err("Refusing to share a file that is not an exported clip.".into());
+    }
+    let file = clip_file(&app, id, &ext, Some(&path))?;
+
+    // Not an error: the interface falls back to revealing the file in Finder.
+    Ok(put_file_on_clipboard(&file).is_ok())
+}
+
+/// Which app `raise_chat_app` ended up in front of the user.
+#[derive(Serialize)]
+struct Raised {
+    /// Bundle id of the app brought to the front, or "" when none was.
+    app: String,
+    /// Web client opened instead, or "" when the app was there.
+    web: String,
+}
+
+/// Bring a chat app to the front, or open its web client if it isn't installed.
+///
+/// The opener plugin's `openUrl` cannot do this: an app's URL scheme only
+/// activates it when it is *not* already running. A bare `tg://` is delivered
+/// to the running instance, which has no action to perform and stays exactly
+/// where it is — which is why the button appeared to do nothing while Telegram
+/// sat open behind the window. `open -b <bundle id>` activates it either way.
+#[tauri::command]
+async fn raise_chat_app(app: AppHandle, target: String) -> Result<Raised, String> {
+    let Some((bundle_ids, web)) = chat_app(&target) else {
+        return Err(format!("Unknown share target {target:?}."));
+    };
+
+    #[cfg(target_os = "macos")]
+    for id in bundle_ids {
+        let raised = Command::new("/usr/bin/open")
+            .args(["-b", id])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if raised {
+            return Ok(Raised { app: (*id).to_string(), web: String::new() });
+        }
+    }
+
+    let _ = bundle_ids;
+    // Not installed — the web client is the honest fallback.
+    tauri_plugin_opener::OpenerExt::opener(&app)
+        .open_url(web, None::<&str>)
+        .map_err(|err| format!("Could not open {web}: {err}"))?;
+    Ok(Raised { app: String::new(), web: web.to_string() })
+}
+
 // ─────────────────────────────── saving ──────────────────────────────────
 
 /// Save a copy of a generated clip wherever the user chooses.
@@ -760,25 +1081,29 @@ fn stop_engine(engine: State<Engine>) {
 /// The engine has already written the clip, so we ask for a destination and
 /// copy the file.
 #[tauri::command]
-async fn save_audio(app: AppHandle, audio_id: String) -> Result<Option<String>, String> {
-    // The id comes from the engine and is interpolated into a path: only ever
-    // accept the shape the engine produces (a 32-char hex uuid).
-    if audio_id.len() != 32 || !audio_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("Bad clip id.".into());
-    }
-
-    let source = layout(&app).data.join("out").join(format!("{audio_id}.wav"));
-    if !source.exists() {
-        return Err("That clip is no longer on disk — generate it again.".into());
-    }
+async fn save_audio(
+    app: AppHandle,
+    audio_id: String,
+    engine_path: Option<String>,
+    format: Option<String>,
+) -> Result<Option<String>, String> {
+    let id = clip_id(&audio_id)?;
+    // No format means the clip itself. The others are the chat-app exports, so
+    // the voice message Telegram wants can be saved as a file instead of only
+    // being handed to Telegram.
+    let ext = format.unwrap_or_else(|| "wav".into()).to_ascii_lowercase();
+    let Some((name, filter)) = save_spec(&ext) else {
+        return Err(format!("A clip cannot be saved as {ext:?}."));
+    };
+    let source = clip_file(&app, id, &ext, engine_path.as_deref())?;
 
     // Blocking is correct here: an async command runs off the main thread, and
     // the dialog plugin puts the panel on the main thread itself.
     let Some(target) = app
         .dialog()
         .file()
-        .set_file_name("speech.wav")
-        .add_filter("WAV audio", &["wav"])
+        .set_file_name(name)
+        .add_filter(filter, &[ext.as_str()])
         .blocking_save_file()
     else {
         return Ok(None); // user cancelled
@@ -800,11 +1125,15 @@ pub fn run() {
             engine_base_url,
             engine_state,
             engine_packages,
+            engine_options,
+            set_engine_mode,
             install_engine,
             install_environment,
             install_package,
             start_engine,
-            save_audio
+            save_audio,
+            copy_clip_to_clipboard,
+            raise_chat_app
         ])
         .setup(|app| {
             // Terminal equivalents of the setup screen's buttons, running
@@ -820,6 +1149,46 @@ pub fn run() {
                 .position(|arg| arg == "--install-library")
                 .and_then(|at| args.get(at + 1))
                 .cloned();
+            // --engine-mode            print the saved mode
+            // --engine-mode <mode>     save it (the app applies it on start)
+            if let Some(at) = args.iter().position(|arg| arg == "--engine-mode") {
+                let handle = app.handle().clone();
+                if let Some(window) = handle.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+                let wanted = args.get(at + 1).cloned();
+                std::thread::spawn(move || {
+                    let layout = layout(&handle);
+                    let code = match wanted {
+                        Some(mode) if MODES.contains(&mode.as_str()) => {
+                            match write_mode(&layout, &mode) {
+                                Ok(()) => {
+                                    println!("engine mode set to {mode}");
+                                    0
+                                }
+                                Err(err) => {
+                                    eprintln!("{err}");
+                                    1
+                                }
+                            }
+                        }
+                        Some(mode) => {
+                            eprintln!("{mode} is not one of {}", MODES.join(", "));
+                            1
+                        }
+                        None => {
+                            println!(
+                                "{} ({} GB of memory)",
+                                read_mode(&layout),
+                                total_memory_gb()
+                            );
+                            0
+                        }
+                    };
+                    std::process::exit(code);
+                });
+                return Ok(());
+            }
             if args.iter().any(|arg| arg == "--list-libraries") {
                 let handle = app.handle().clone();
                 if let Some(window) = handle.get_webview_window("main") {
@@ -883,4 +1252,61 @@ pub fn run() {
                 stop_engine(app.state::<Engine>());
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::names_a_clip;
+    use std::path::Path;
+
+    const ID: &str = "975d5eee33bf436c99498901cb666032";
+
+    /// The case this exists for: the clip lives in another engine's data
+    /// directory, so the path the engine reported is the only way to it.
+    #[test]
+    fn accepts_a_clip_from_another_engines_directory() {
+        let name = format!("{ID}.wav");
+        assert!(names_a_clip(
+            Path::new(&format!("/Users/me/repo/python/data/out/{name}")),
+            &name
+        ));
+        assert!(names_a_clip(
+            Path::new(&format!(
+                "/Users/me/Library/Application Support/com.example.app/data/out/{name}"
+            )),
+            &name
+        ));
+    }
+
+    #[test]
+    fn accepts_the_chat_app_exports() {
+        for ext in ["ogg", "m4a", "mp3"] {
+            let name = format!("{ID}.{ext}");
+            assert!(names_a_clip(Path::new(&format!("/data/out/{name}")), &name));
+        }
+    }
+
+    #[test]
+    fn rejects_anything_that_is_not_this_clip_in_a_clip_directory() {
+        let name = format!("{ID}.wav");
+        // Not in a clip directory.
+        assert!(!names_a_clip(Path::new(&format!("/tmp/{name}")), &name));
+        assert!(!names_a_clip(Path::new(&format!("/Users/me/Documents/{name}")), &name));
+        // A different file in one.
+        assert!(!names_a_clip(Path::new("/data/out/secret.wav"), &name));
+        // Traversal: the last two components are what is checked, so a `..`
+        // only moves the target out of reach of the rule.
+        assert!(!names_a_clip(
+            Path::new(&format!("/data/out/{name}/../../../etc/passwd")),
+            &name
+        ));
+        assert!(!names_a_clip(Path::new("/data/out/../id_rsa"), &name));
+        // Another clip's id.
+        assert!(!names_a_clip(
+            Path::new("/data/out/00000000000000000000000000000000.wav"),
+            &name
+        ));
+        // Nothing at all, which is what an older webview would send.
+        assert!(!names_a_clip(Path::new(""), &name));
+    }
 }

@@ -46,7 +46,24 @@ _SENTENCE_END = re.compile(r"(?<=[។៕!?\.])\s*|\n+")
 _SOFT_BREAK = re.compile(r"(?<=[,，;:៖])\s*")
 
 DEFAULT_MAX_CHARS = 90          # ~6–8s of Khmer speech per chunk
-GAP_SECONDS = 0.18              # pause inserted between chunks
+
+#: How long a *single sentence* may get before it is broken up. Larger than
+#: `DEFAULT_MAX_CHARS` on purpose: that limit exists to stop the voice drifting
+#: across a long script, which is a per-chunk problem, while breaking inside a
+#: sentence causes a different and worse one. Each chunk is generated on its
+#: own, so a piece ending mid-clause still gets utterance-final intonation and
+#: a full pause — the reader hears a full stop where the grammar has none.
+#: A 137-character Khmer sentence rendered cleanly as a single chunk, so the
+#: old limit was splitting sentences that never needed splitting.
+SENTENCE_MAX_CHARS = 160
+
+GAP_SECONDS = 0.18              # pause inserted between sentences
+#: Pause used when a break falls *inside* a sentence. Measured on a real Khmer
+#: paragraph, the old code gave a mid-clause break 0.22 s against 0.27 s for a
+#: real sentence end — indistinguishable to a listener, so the sentence
+#: appeared to stop in the middle. This keeps the join audible as a breath
+#: rather than as a full stop.
+MID_SENTENCE_GAP = 0.06
 LEVEL_MATCH_LIMIT_DB = 6.0      # most we'll shift one chunk to match the rest
 #: Re-rolls allowed per chunk when the voice has drifted. Each one costs a
 #: whole extra generation, so this is deliberately small — it is there to catch
@@ -99,22 +116,39 @@ def split_mixed_scripts(chunk: str, min_run: int = MIN_SCRIPT_RUN) -> list[str]:
     return [seg.strip() for _, seg in runs if seg.strip()]
 
 
-def split_text(text: str, max_chars: int = DEFAULT_MAX_CHARS) -> list[str]:
-    """Cut text into chunks short enough for the model to render cleanly."""
+def split_marked(
+    text: str,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    sentence_max_chars: int = SENTENCE_MAX_CHARS,
+) -> list[tuple[str, bool]]:
+    """Cut text into chunks, each tagged with whether it ends a sentence.
+
+    The tag is what lets the join between two chunks sound like what it
+    actually is. A chunk that ends a sentence is followed by a sentence-sized
+    pause; one that stops mid-clause gets a breath instead. Without it every
+    join sounded like a full stop, including the ones in the middle of a
+    thought.
+
+    A sentence is only broken up once it passes `sentence_max_chars`, which is
+    deliberately higher than `max_chars` — see the note on that constant.
+    """
     text = text.strip()
     if not text:
         return []
 
-    chunks: list[str] = []
+    chunks: list[tuple[str, bool]] = []
     for sentence in (s.strip() for s in _SENTENCE_END.split(text)):
         if not sentence:
             continue
-        if len(sentence) <= max_chars:
-            chunks.append(sentence)
+        if len(sentence) <= sentence_max_chars:
+            chunks.append((sentence, True))
             continue
 
-        # Too long: try commas, then fall back to spaces.
+        # Too long even for one sentence: try commas, then fall back to
+        # spaces, which in Khmer separate phrases rather than words and so
+        # are a real phrase boundary, not an arbitrary cut.
         buffer = ""
+        parts: list[str] = []
         pieces = [p for p in _SOFT_BREAK.split(sentence) if p]
         if len(pieces) == 1:
             pieces = sentence.split(" ")
@@ -124,18 +158,28 @@ def split_text(text: str, max_chars: int = DEFAULT_MAX_CHARS) -> list[str]:
                 buffer = candidate
             else:
                 if buffer:
-                    chunks.append(buffer)
+                    parts.append(buffer)
                 buffer = piece
         if buffer:
-            chunks.append(buffer)
+            parts.append(buffer)
+        # Only the final piece carries the sentence's own ending.
+        chunks.extend((p, i == len(parts) - 1) for i, p in enumerate(parts))
 
     # Finally, separate the languages where the runs are long enough to stand
-    # on their own, so no single generation has to code-switch.
-    out: list[str] = []
-    for chunk in chunks:
-        if chunk.strip():
-            out.extend(split_mixed_scripts(chunk))
+    # on their own, so no single generation has to code-switch. These splits
+    # are inside a chunk, so only the last piece keeps the chunk's ending.
+    out: list[tuple[str, bool]] = []
+    for chunk, ends in chunks:
+        if not chunk.strip():
+            continue
+        runs = split_mixed_scripts(chunk)
+        out.extend((r, ends and i == len(runs) - 1) for i, r in enumerate(runs))
     return out
+
+
+def split_text(text: str, max_chars: int = DEFAULT_MAX_CHARS) -> list[str]:
+    """Cut text into chunks short enough for the model to render cleanly."""
+    return [chunk for chunk, _ in split_marked(text, max_chars)]
 
 
 def match_levels(pieces: list[np.ndarray], sample_rate: int) -> list[np.ndarray]:
@@ -250,11 +294,15 @@ def generate_long(
     spread (113 Hz undirected, 138 Hz directed).
     """
     sample_rate = model.tts_model.sample_rate
-    chunks = split_text(text, max_chars)
-    if not chunks:
+    marked = split_marked(text, max_chars)
+    if not marked:
         return np.zeros(0, dtype="float32"), sample_rate
+    chunks = [chunk for chunk, _ in marked]
+    ends_sentence = [ends for _, ends in marked]
 
     gap = np.zeros(max(0, int(sample_rate * gap_seconds)), dtype="float32")
+    # A break inside a sentence is a breath, not a full stop.
+    short_gap = np.zeros(max(0, int(sample_rate * MID_SENTENCE_GAP)), dtype="float32")
     temp_dir = Path(tempfile.mkdtemp(prefix="voxcpm_ref_"))
     # Mutable so `render` below picks up the seed adopted after the first chunk.
     voice = {"ref": reference_wav, "prompt": prompt_text}
@@ -297,8 +345,12 @@ def generate_long(
 
     out: list[np.ndarray] = []
     for i, piece in enumerate(pieces):
-        if i and gap.size:
-            out.append(gap)
+        if i:
+            # The pause belongs to the join, so it is chosen by whether the
+            # *previous* chunk finished its sentence.
+            join = gap if ends_sentence[i - 1] else short_gap
+            if join.size:
+                out.append(join)
         out.append(piece)
     return np.concatenate(out), sample_rate
 

@@ -84,6 +84,33 @@ STYLES: dict[str, Style] = {
         energy=5,
         pace="fast",
     ),
+    # The five presets above are all advertising reads, which left anything
+    # that is simply *told* — a story, a report, a piece of news, a personal
+    # account — with no setting that fits. Every option pushed a sell onto
+    # copy that was not selling anything, so the honest answer to "which one
+    # should I use" was "none of them". These two close that gap.
+    "narrative": Style(
+        key="narrative",
+        label="Storyteller",
+        blurb="Telling, not selling. Stories, reports, explanation, news.",
+        describe="measured storytelling voice, natural and expressive, unhurried and clear",
+        cfg_value=1.9,
+        mastering="broadcast",
+        energy=3,
+        pace="natural",
+    ),
+    "heartfelt": Style(
+        key="heartfelt",
+        label="Heartfelt",
+        blurb="Gentle and sincere, with weight. Difficult or moving subjects.",
+        describe="gentle sincere voice, warm and unhurried, quietly emotional, thoughtful",
+        cfg_value=1.8,
+        # Light, not broadcast: compressing an emotional read flattens the very
+        # dynamics that carry the feeling.
+        mastering="light",
+        energy=2,
+        pace="slow",
+    ),
     "testimonial": Style(
         key="testimonial",
         label="Testimonial",
@@ -168,16 +195,53 @@ def build_direction(
     )
 
 
-def plain_direction(mastering: str = CLEANUP_DEFAULT) -> Direction:
-    """An undirected read — the tuner switched off.
+def plain_direction(mastering: str = CLEANUP_DEFAULT, pace: str = "natural") -> Direction:
+    """An undirected read — the tuner switched off — optionally paced.
 
     Still mastered. Switching off the *performance* is a reasonable thing to
     want; shipping an uncleaned read is not, so this defaults to the cleanup
     voicing rather than to no processing. "off" remains available explicitly.
+
+    Wanting to slow a read down without also making it sound like an advert is
+    an ordinary thing to want, so `pace` is honoured here as well. It is the
+    one tuner control that still means something with no style attached, and
+    it works on two levels:
+
+    * **"natural" sends no instruction at all.** That is what keeps the
+      default path undirected in the strict sense, which matters because an
+      instruction and a reference transcript cannot be combined — the moment
+      there is one, continuation cloning is dropped and the voice holds less
+      steadily (113 Hz spread undirected against 138 Hz directed).
+    * **"fast" sends the pace phrase on its own.** That measurably speeds the
+      read up (-8% on a Khmer sentence, three runs each), at the cost of the
+      continuation cloning above. It is the smallest instruction that can do
+      the job: it directs the speed without dictating a performance the copy
+      may not want.
+    * **"slow" sends the same kind of phrase, but do not expect much of it.**
+      VoxCPM2 does not obey it in Khmer. Measured over three runs each on one
+      sentence, against a 3.52 s baseline:
+
+          (slower, deliberate pace)                 3.47 s   -1.5%
+          (speaking very slowly)                    3.36 s   -4.5%
+          (slow unhurried delivery, taking time)    3.57 s   +1.5%
+          (slower, deliberate pace) at cfg 2.6      3.63 s   +3.0%
+          (speaking very slowly) at cfg 2.6         3.41 s   -3.0%
+
+      Every one of those is smaller than the run-to-run spread, so there is no
+      wording here worth preferring — the model simply does not slow down for
+      Khmer. What "slow" *does* reliably change is the gap below. Genuinely
+      slowing the delivery would need the audio time-stretched after the fact,
+      which is a quality trade-off nobody has asked for yet.
+
+    The inter-sentence gap follows the pace either way, since that needs no
+    instruction at all, and it is the part that works in both directions.
     """
+    pace = pace if pace in PACE_LEVELS else "natural"
+    _, phrase, gap = PACE_LEVELS[pace]
     return Direction(
-        style="none", energy=DEFAULT_ENERGY, pace="natural", instruction="",
-        cfg_value=2.0, gap_seconds=PACE_LEVELS["natural"][2], mastering=mastering,
+        style="none", energy=DEFAULT_ENERGY, pace=pace,
+        instruction=f"({phrase})" if phrase else "",
+        cfg_value=2.0, gap_seconds=gap, mastering=mastering,
     )
 
 
