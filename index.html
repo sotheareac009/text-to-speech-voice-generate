@@ -1,10 +1,27 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri + React + Typescript</title>
+    <title>Voice Studio</title>
+    <script>
+      // Resolve the theme before the first paint. React sets this attribute
+      // too, but it mounts a frame or two later — long enough for a dark-mode
+      // user to see a white flash on every launch.
+      (function () {
+        try {
+          var saved = localStorage.getItem("voice-studio-theme") || "system";
+          var dark =
+            saved === "dark" ||
+            (saved === "system" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.dataset.theme = dark ? "dark" : "light";
+        } catch (e) {
+          /* private window, blocked storage: the dark default stands */
+        }
+      })();
+    </script>
   </head>
 
   <body>
