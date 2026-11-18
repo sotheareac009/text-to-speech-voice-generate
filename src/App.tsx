@@ -36,6 +36,7 @@ import {
 } from "./install";
 import { Block } from "./Block";
 import Shorts from "./Shorts";
+import Dub from "./Dub";
 import "./App.css";
 
 /** A built-in voice key from the engine's catalog, or "upload" to clone. */
@@ -147,7 +148,7 @@ function loadTakes(): Take[] {
  * where files go, which theme — lives in Settings, so the screen you work on
  * holds only the things that change between one take and the next.
  */
-type Page = "studio" | "voices" | "direction" | "shorts" | "settings";
+type Page = "studio" | "voices" | "direction" | "shorts" | "dub" | "settings";
 
 const PAGES: { key: Page; label: string; title: string; blurb: string }[] = [
   {
@@ -174,6 +175,13 @@ const PAGES: { key: Page; label: string; title: string; blurb: string }[] = [
     title: "Faceless shorts",
     blurb:
       "An idea becomes a vertical video — Claude writes it, your voices read it, and it is rendered here.",
+  },
+  {
+    key: "dub",
+    label: "Dub",
+    title: "Dub a video",
+    blurb:
+      "Upload a video and get it back speaking another language, in time with the picture.",
   },
   {
     key: "settings",
@@ -1056,6 +1064,9 @@ function App() {
           {/* ── Shorts ─────────────────────────────────────────────────── */}
           {page === "shorts" && <Shorts />}
 
+          {/* ── Dub ────────────────────────────────────────────────────── */}
+          {page === "dub" && <Dub />}
+
           {/* ── Settings ───────────────────────────────────────────────── */}
           {page === "settings" && (
             <>
@@ -1215,6 +1226,13 @@ function Icon({ name }: { name: Page | "sun" | "moon" }) {
         <svg {...common}>
           <rect x="6.5" y="2.5" width="11" height="19" rx="2.6" />
           <path d="M10.6 9.3 14.8 12l-4.2 2.7z" />
+        </svg>
+      );
+    case "dub":
+      return (
+        <svg {...common}>
+          <path d="M4 7.5h7.5M4 12h5M4 16.5h7.5" />
+          <path d="M15.5 8.2a4.5 4.5 0 0 1 0 7.6M18.4 5.6a8 8 0 0 1 0 12.8" />
         </svg>
       );
     case "settings":

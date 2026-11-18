@@ -84,15 +84,60 @@ export async function getShortsConfig(): Promise<ShortsConfig> {
 export const getShorts = () =>
   fetch(`${BASE}/api/jobs`).then((r) => r.json() as Promise<ShortVideo[]>);
 
+/**
+ * Start a slow call and wait for its answer by asking, not by holding.
+ *
+ * A script from opus takes about fifty seconds and web research can take
+ * minutes, while WebKit aborts any request at sixty — which surfaced as
+ * "Failed to fetch" on a script that had in fact been written perfectly. The
+ * engine now answers immediately with an id and keeps the result until it is
+ * collected.
+ */
+async function waitFor<T>(path: string, body: unknown): Promise<T> {
+  const { workId } = await post<{ workId: string }>(path, body);
+  const until = Date.now() + 20 * 60_000;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1500));
+    const res = await fetch(`${BASE}/api/work/${workId}`);
+    if (res.status === 404) throw new Error("The engine forgot this request — try again.");
+    const data = (await res.json()) as { status?: string; result?: T; error?: string };
+    if (!res.ok) throw new Error(data.error || `The engine answered ${res.status}.`);
+    if (data.status === "done") return data.result as T;
+    if (Date.now() > until) throw new Error("Gave up waiting for the engine.");
+  }
+}
+
 export const research = (interest: string, platform: string, web: boolean) =>
-  post<{ niches: Niche[] }>("/api/research", { interest, platform, web });
+  waitFor<{ niches: Niche[] }>("/api/research", { interest, platform, web });
 
 export const writeScript = (idea: string, seconds: number, tone: string, language: string) =>
-  post<Script>("/api/script", { idea, seconds, tone, language });
+  waitFor<Script>("/api/script", { idea, seconds, tone, language });
 
 export const startRender = (request: unknown) => post<{ jobId: string }>("/api/render", request);
 
+/**
+ * Hand a video over to be dubbed.
+ *
+ * Multipart rather than JSON because the video itself goes with it, and the
+ * engine streams it to disk instead of holding it in memory.
+ */
+export async function startDub(form: FormData): Promise<{ jobId: string }> {
+  const res = await fetch(`${BASE}/api/dub`, { method: "POST", body: form });
+  if (!res.ok) {
+    const detail = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(detail.error || `The shorts engine answered ${res.status}.`);
+  }
+  return res.json() as Promise<{ jobId: string }>;
+}
+
 export const eventsUrl = (jobId: string) => `${BASE}/api/jobs/${jobId}/events`;
+
+/** Where a finished file is on disk, for showing it in Finder. */
+export const filePath = (file: string) =>
+  fetch(`${BASE}/api/videos/${encodeURIComponent(file)}/path`).then(async (r) => {
+    if (!r.ok) throw new Error(`The engine could not find ${file}.`);
+    return ((await r.json()) as { path: string }).path;
+  });
 
 export const deleteShort = (id: string) =>
   fetch(`${BASE}/api/jobs/${id}`, { method: "DELETE" }).then((r) => r.json());

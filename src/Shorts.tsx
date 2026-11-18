@@ -13,9 +13,12 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Block } from "./Block";
 import {
   deleteShort,
+  filePath,
   estimateSeconds,
   eventsUrl,
   getShorts,
@@ -55,6 +58,16 @@ const CAPTION_STYLES = [
   { key: "minimal", label: "Minimal" },
   { key: "boxed", label: "Boxed" },
 ] as const;
+/** Ready-made highlight colours; the first is the one funshort uses. */
+const HIGHLIGHTS = [
+  { hex: "#FCE401", label: "Funshort yellow" },
+  { hex: "#FF8A00", label: "Orange" },
+  { hex: "#00E5A0", label: "Mint" },
+  { hex: "#4FC3FF", label: "Sky" },
+  { hex: "#FF4FD8", label: "Pink" },
+  { hex: "#FFFFFF", label: "White" },
+];
+
 const READS = ["narrative", "promo", "friendly", "premium", "announcer", "heartfelt", "testimonial"];
 const MOODS = ["upbeat", "calm", "dramatic", "mysterious", "inspiring"] as const;
 
@@ -77,6 +90,17 @@ export default function Shorts() {
   const [writing, setWriting] = useState(false);
 
   const [voice, setVoice] = useState("female");
+  /*
+   * Directed by default. This has been both ways, and the measurement that
+   * decided it the first time only told half the story:
+   *
+   *   directed     pitch drifts 73.8 Hz between scenes, 144.3 Hz range within
+   *   undirected   drifts 29.7 Hz between scenes, 111.3 Hz range within
+   *
+   * Undirected is steadier and flatter — and flat is what a listener calls
+   * robotic. Steadiness is a number; expression is the thing people actually
+   * hear, so the performance wins and the drift is a known cost.
+   */
   const [read, setRead] = useState("narrative");
   const [pace, setPace] = useState("natural");
   const [speed, setSpeed] = useState(1);
@@ -85,6 +109,9 @@ export default function Shorts() {
   const [capStyle, setCapStyle] = useState<"pop" | "minimal" | "boxed">("pop");
   const [capPosition, setCapPosition] = useState<"middle" | "bottom">("middle");
   const [capUpper, setCapUpper] = useState(false);
+  // Measured off the reference video; see POP in the engine's captions module.
+  const [capHighlight, setCapHighlight] = useState("#FCE401");
+  const [capText, setCapText] = useState("#FFFFFF");
   const [musicOn, setMusicOn] = useState(true);
   const [musicVolume, setMusicVolume] = useState(0.15);
 
@@ -220,7 +247,13 @@ export default function Shorts() {
         script,
         voice: { key: voice, style: read, energy: 3, pace, mastering: "broadcast", speed },
         visuals: { style: imageStyle },
-        captions: { on: capOn, style: capStyle, position: capPosition, uppercase: capUpper },
+        captions: {
+          on: capOn,
+          style: capStyle,
+          position: capPosition,
+          uppercase: capUpper,
+          colours: { highlight: capHighlight, text: capText },
+        },
         music: { on: musicOn, volume: musicVolume },
       });
       const source = new EventSource(eventsUrl(jobId));
@@ -542,7 +575,7 @@ export default function Shorts() {
       {/* ── 3 ───────────────────────────────────────────────────────────── */}
       <Block
         title="Voice, visuals & captions"
-        note="The voice list is this app's own — built-in voices and anything you have cloned."
+        note="The voice list is this app's own — built-in voices and anything you have cloned. A directed read performs each scene, which is livelier but lets the voice drift a little between them; undirected is steadier and flatter."
       >
         <div className="shorts-row">
           <label className="field grow" style={{ marginTop: 0 }}>
@@ -567,7 +600,7 @@ export default function Shorts() {
             <span>Read as</span>
             <span className="select-wrap">
               <select value={read} onChange={(e) => setRead(e.target.value)}>
-                <option value="">Undirected</option>
+                <option value="">Undirected — steadier, flatter</option>
                 {READS.map((r) => (
                   <option key={r}>{r}</option>
                 ))}
@@ -650,6 +683,34 @@ export default function Shorts() {
           </label>
         </div>
 
+        <div className="shorts-row" style={{ marginTop: 12 }}>
+          <label className="swatch">
+            <input
+              type="color"
+              value={capHighlight}
+              onChange={(e) => setCapHighlight(e.target.value)}
+            />
+            <span>Spoken word</span>
+          </label>
+          <label className="swatch">
+            <input type="color" value={capText} onChange={(e) => setCapText(e.target.value)} />
+            <span>Other words</span>
+          </label>
+          <div className="chips" style={{ marginTop: 0 }}>
+            {HIGHLIGHTS.map((colour) => (
+              <button
+                key={colour.hex}
+                className={colour.hex === capHighlight.toUpperCase() ? "chip active" : "chip"}
+                title={colour.label}
+                onClick={() => setCapHighlight(colour.hex)}
+              >
+                <span className="dab" style={{ background: colour.hex }} />
+                {colour.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
         <h3 className="sub-head">Music</h3>
         <div className="shorts-row" style={{ marginTop: 10 }}>
           <label className="switch">
@@ -708,12 +769,12 @@ export default function Shorts() {
               <span className="hint muted" style={{ margin: 0 }}>
                 {video.seconds.toFixed(1)}s · {(video.bytes / 1e6).toFixed(1)} MB · 1080×1920
               </span>
-              <a className="btn ghost tiny" href={videoUrl(video.file)} download>
-                Download MP4
-              </a>
-              <a className="btn ghost tiny" href={videoUrl(video.srt)} download>
-                Download .srt
-              </a>
+              <button className="btn ghost tiny" onClick={() => saveFile(video.file, setError)}>
+                {isTauri() ? "Show the MP4 in Finder" : "Download MP4"}
+              </button>
+              <button className="btn ghost tiny" onClick={() => saveFile(video.srt, setError)}>
+                {isTauri() ? "Show the .srt in Finder" : "Download .srt"}
+              </button>
             </div>
           </div>
         )}
@@ -758,4 +819,27 @@ export default function Shorts() {
       )}
     </>
   );
+}
+
+/**
+ * Hand a finished file to the person.
+ *
+ * Never as a link. WKWebView ignores the `download` attribute, so an anchor
+ * pointing at a video navigates this window to it — the app appears to crash,
+ * replaced by a bare video player. In the app the file is revealed in Finder
+ * instead; in a browser, where anchors work, the anchor is used.
+ */
+async function saveFile(file: string, setError: (m: string) => void) {
+  try {
+    if (isTauri()) {
+      await revealItemInDir(await filePath(file));
+    } else {
+      const link = document.createElement("a");
+      link.href = videoUrl(file);
+      link.download = file;
+      link.click();
+    }
+  } catch (e) {
+    setError(e instanceof Error ? e.message : String(e));
+  }
 }

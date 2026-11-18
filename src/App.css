@@ -969,3 +969,25 @@ input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.12); }
 .short-result video { width: 240px; border-radius: var(--r-md); background: #000; }
 .short-side { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; min-width: 0; }
 .short-side > strong { font-size: 0.95rem; }
+
+/* A colour well, labelled, for the caption colours. */
+.swatch { display: inline-flex; align-items: center; gap: 9px; font-size: 0.8rem; color: var(--fg-soft); cursor: pointer; }
+.swatch input[type="color"] {
+  width: 38px;
+  height: 30px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+/* The dot of colour on a preset chip. */
+.chip .dab {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: -1px;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
