@@ -111,6 +111,31 @@ STYLES: dict[str, Style] = {
         energy=2,
         pace="slow",
     ),
+    # Telling someone something delightful, not performing a joke. The read
+    # that makes a fun fact land is a smile you can hear and a beat before the
+    # surprising part — the "wait till you hear this" voice. An ad read fights
+    # it: promo sells the fact, which is exactly what kills it.
+    "funny": Style(
+        key="funny",
+        label="Fun fact",
+        blurb="Playful and amused, like telling a friend something they won't believe.",
+        describe=(
+            "playful amused voice, smiling and warm, telling a friend something "
+            "surprising, light and animated, a grin in the voice, gently teasing"
+        ),
+        # Base, before energy 4 adds its own +0.2 — which lands the read at
+        # 2.2: above the storyteller's 1.9 so the playfulness is actually
+        # followed, below the promo's 2.5 where everything becomes a sell.
+        cfg_value=2.0,
+        # Broadcast, not punchy: punchy flattens the lift and drop that carries
+        # the joke. Not light either — a short has music under it.
+        mastering="broadcast",
+        energy=4,
+        # The pause matters more here than the speed. Natural leaves 0.18s
+        # between sentences, which is the beat a punchline needs; fast closes
+        # it to 0.10s and the surprise arrives before anyone is ready for it.
+        pace="natural",
+    ),
     "testimonial": Style(
         key="testimonial",
         label="Testimonial",

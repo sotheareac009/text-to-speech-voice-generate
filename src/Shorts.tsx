@@ -16,6 +16,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Block } from "./Block";
+import { Preview } from "./Preview";
 import {
   deleteShort,
   filePath,
@@ -25,6 +26,13 @@ import {
   getShortsConfig,
   research,
   startRender,
+  startSceneImage,
+  startSceneImages,
+  startSceneVoice,
+  cancelJob,
+  type SceneTake,
+  sceneUrl,
+  type SceneShot,
   videoUrl,
   writeScript,
   type Niche,
@@ -62,6 +70,12 @@ function plannedScenes(seconds: number): number {
  * video is mostly spent drawing, and that is worth knowing before pressing
  * the button rather than twenty minutes in.
  */
+function renderMinutes(scenes: number, seconds: number, khmer: boolean): number {
+  const drawing = (scenes * 40) / 60;
+  const speaking = seconds / (khmer ? 60 : 75);
+  return Math.round((drawing + speaking + 0.4 + seconds / 180) * 10) / 10;
+}
+
 function effortMinutes(seconds: number, khmer: boolean): number {
   const drawing = (plannedScenes(seconds) * 40) / 60;
   const speaking = seconds / (khmer ? 60 : 75);
@@ -98,8 +112,64 @@ const HIGHLIGHTS = [
   { hex: "#FFFFFF", label: "White" },
 ];
 
-const READS = ["narrative", "promo", "friendly", "premium", "announcer", "heartfelt", "testimonial"];
+const READS = ["narrative", "funny", "promo", "friendly", "premium", "announcer", "heartfelt", "testimonial"];
 const MOODS = ["upbeat", "calm", "dramatic", "mysterious", "inspiring"] as const;
+
+/**
+ * A setting that survives the app closing.
+ *
+ * Choosing a voice, a read, a caption colour and a music level before every
+ * video is work nobody should repeat — these are preferences, not decisions
+ * about one particular short. Written per key so a value added later does not
+ * disturb the ones already stored, and wrapped because storage throws rather
+ * than returning nothing when it is unavailable.
+ */
+function useKept<T>(key: string, fallback: T): [T, (value: T) => void] {
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const stored = localStorage.getItem(`shorts.${key}`);
+      return stored === null ? fallback : (JSON.parse(stored) as T);
+    } catch {
+      return fallback;
+    }
+  });
+  const keep = (next: T) => {
+    setValue(next);
+    try {
+      localStorage.setItem(`shorts.${key}`, JSON.stringify(next));
+    } catch {
+      /* a private window, or storage turned off: the setting just won't last */
+    }
+  };
+  return [value, keep];
+}
+
+/** The settings a finished video was made with, in one line. */
+function madeWith(video: ShortVideo): string {
+  const r = video.request;
+  if (!r) return "";
+  const bits: string[] = [];
+  if (r.voice?.key) bits.push(r.voice.key);
+  if (r.voice?.style) bits.push(r.voice.style);
+  else if (r.voice) bits.push("undirected");
+  if (r.voice?.pace && r.voice.pace !== "natural") bits.push(`${r.voice.pace} pace`);
+  if (r.voice?.speed && Math.abs(r.voice.speed - 1) > 0.01) bits.push(`${r.voice.speed}×`);
+  if (r.visuals?.style) bits.push(r.visuals.style);
+  if (r.captions) bits.push(r.captions.on ? `${r.captions.style} captions` : "no captions");
+  if (r.music) bits.push(r.music.on ? `music ${Math.round(r.music.volume * 100)}%` : "no music");
+  return bits.join(" · ");
+}
+
+/** The stop button: an icon, next to whatever is running. */
+function Stop({ onClick, what }: { onClick: () => void; what: string }) {
+  return (
+    <button className="stop" onClick={onClick} title={`Stop ${what}`} aria-label={`Stop ${what}`}>
+      <svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor" />
+      </svg>
+    </button>
+  );
+}
 
 export default function Shorts() {
   const [config, setConfig] = useState<ShortsConfig | null>(null);
@@ -113,13 +183,13 @@ export default function Shorts() {
   const [researching, setResearching] = useState(false);
 
   const [idea, setIdea] = useState("");
-  const [seconds, setSeconds] = useState(45);
-  const [tone, setTone] = useState(TONES[0]);
-  const [language, setLanguage] = useState(LANGUAGES[0]);
+  const [seconds, setSeconds] = useKept("seconds", 45);
+  const [tone, setTone] = useKept("tone", TONES[0]);
+  const [language, setLanguage] = useKept("language", LANGUAGES[0]);
   const [script, setScript] = useState<Script | null>(null);
   const [writing, setWriting] = useState(false);
 
-  const [voice, setVoice] = useState("female");
+  const [voice, setVoice] = useKept("voice", "female");
   /*
    * Directed by default. This has been both ways, and the measurement that
    * decided it the first time only told half the story:
@@ -131,26 +201,71 @@ export default function Shorts() {
    * robotic. Steadiness is a number; expression is the thing people actually
    * hear, so the performance wins and the drift is a known cost.
    */
-  const [read, setRead] = useState("narrative");
-  const [pace, setPace] = useState("natural");
-  const [speed, setSpeed] = useState(1);
-  const [imageStyle, setImageStyle] = useState(IMAGE_STYLES[0].key);
-  const [capOn, setCapOn] = useState(true);
-  const [capStyle, setCapStyle] = useState<"pop" | "minimal" | "boxed">("pop");
-  const [capPosition, setCapPosition] = useState<"middle" | "bottom">("middle");
-  const [capUpper, setCapUpper] = useState(false);
+  const [read, setRead] = useKept("read", "narrative");
+  const [pace, setPace] = useKept("pace", "natural");
+  const [speed, setSpeed] = useKept("speed", 1);
+  const [imageStyle, setImageStyle] = useKept("imageStyle", IMAGE_STYLES[0].key);
+  const [capOn, setCapOn] = useKept("capOn", true);
+  const [capStyle, setCapStyle] = useKept<"pop" | "minimal" | "boxed">("capStyle", "pop");
+  const [capPosition, setCapPosition] = useKept<"middle" | "bottom">("capPosition", "middle");
+  const [capUpper, setCapUpper] = useKept("capUpper", false);
   // Measured off the reference video; see POP in the engine's captions module.
-  const [capHighlight, setCapHighlight] = useState("#FCE401");
-  const [capText, setCapText] = useState("#FFFFFF");
-  const [musicOn, setMusicOn] = useState(true);
-  const [musicVolume, setMusicVolume] = useState(0.15);
+  const [capHighlight, setCapHighlight] = useKept("capHighlight", "#FCE401");
+  const [capText, setCapText] = useKept("capText", "#FFFFFF");
+  const [musicOn, setMusicOn] = useKept("musicOn", true);
+  const [musicVolume, setMusicVolume] = useKept("musicVolume", 0.15);
 
   const [rendering, setRendering] = useState(false);
+
+  /*
+   * The pictures, made before the video and kept.
+   *
+   * Making a video is three steps now rather than one button: write the
+   * script, draw its pictures, then render. The middle step exists because a
+   * picture that disappoints used to be discovered in a finished video —
+   * half an hour of drawing and speaking — and fixing one frame meant doing
+   * all of it again.
+   */
+  const [project, setProject] = useState("");
+  const [shots, setShots] = useState<SceneShot[]>([]);
+  const [drawing, setDrawing] = useState(false);
+  const [redrawing, setRedrawing] = useState<number | null>(null);
+  const [preview, setPreview] = useState<{ src: string; caption: string } | null>(null);
+  /*
+   * Lines already spoken, kept per scene.
+   *
+   * Optional throughout: a scene with no take is simply spoken during the
+   * render, as it always was. The point is to be able to *hear* a line —
+   * a name said wrong, a read that is too flat — before committing to the
+   * whole video.
+   */
+  const [takes, setTakes] = useState<SceneTake[]>([]);
+  const [speaking, setSpeaking] = useState<number | null>(null);
+  /*
+   * Drawing has its own log and its own bar.
+   *
+   * Sharing the render's put "Generating 10 images…" under a Render heading
+   * that had not started, and wiped it when the render did. Two pieces of
+   * work, two places to watch them.
+   */
+  const [imgLines, setImgLines] = useState<string[]>([]);
+  const [imgProgress, setImgProgress] = useState(0);
+  /*
+   * What is running right now, so it can be stopped.
+   *
+   * Each of the three slow things keeps its own job id: drawing a set of
+   * pictures, speaking one line, and making the video. A stop button that
+   * stops the wrong one is worse than none.
+   */
+  const [imgJob, setImgJob] = useState("");
+  const [voiceJob, setVoiceJob] = useState("");
+  const [renderJob, setRenderJob] = useState("");
   const [progress, setProgress] = useState(0);
   const [lines, setLines] = useState<string[]>([]);
   const [video, setVideo] = useState<ShortVideo | null>(null);
   const [library, setLibrary] = useState<ShortVideo[]>([]);
   const logRef = useRef<HTMLPreElement>(null);
+  const imgLogRef = useRef<HTMLPreElement>(null);
 
   const refreshLibrary = useCallback(() => {
     getShorts().then(setLibrary).catch(() => undefined);
@@ -174,6 +289,9 @@ export default function Shorts() {
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [lines]);
+  useEffect(() => {
+    if (imgLogRef.current) imgLogRef.current.scrollTop = imgLogRef.current.scrollHeight;
+  }, [imgLines]);
 
   // ── The engine is not there ────────────────────────────────────────────
   if (offline) {
@@ -202,6 +320,12 @@ export default function Shorts() {
   const groups = [...new Set(voices.map((v) => v.group))];
   const blocked = !!config && (!config.ffmpeg.ok || !config.voice.ok || !config.claude.ok);
   const runtime = script ? estimateSeconds(script) : 0;
+  // Pictures belong to the script they were drawn for. A rewritten script has
+  // different scenes, so showing the old pictures beside it would be a lie.
+  const ready = !!script && shots.length === script.scenes.length;
+  const shotFor = new Map(shots.map((shot) => [shot.index, shot]));
+  const takeFor = new Map(takes.map((take) => [take.index, take]));
+  const khmerScript = /[ក-៿]/.test(language) || /khmer/i.test(language);
 
   async function run<T>(job: () => Promise<T>, busy: (on: boolean) => void, after?: (r: T) => void) {
     setError("");
@@ -265,6 +389,166 @@ export default function Shorts() {
   }
 
   /** Start a render and follow its log over SSE. */
+  /** Step two: every scene's picture, kept where they can be looked at. */
+  async function onImages() {
+    if (!script) return;
+    setError("");
+    setImgLines([]);
+    setImgProgress(0);
+    // Drawing again replaces the set, so the old pictures go now rather than
+    // sitting under the scenes pretending to be this run's.
+    setShots([]);
+    setDrawing(true);
+    try {
+      const { jobId, project: id } = await startSceneImages(script, imageStyle, project || undefined);
+      setImgJob(jobId);
+      setProject(id);
+      const source = new EventSource(eventsUrl(jobId));
+      source.addEventListener("log", (e) => {
+        const data = JSON.parse((e as MessageEvent).data) as { line: string; progress: number };
+        setImgLines((prev) => [...prev, data.line]);
+        setImgProgress(data.progress);
+      });
+      // Each picture as it lands, into its own scene — not all of them at
+      // the end. Seven minutes of drawing should look like seven minutes of
+      // pictures appearing.
+      source.addEventListener("step", (e) => {
+        const shot = JSON.parse((e as MessageEvent).data) as SceneShot;
+        setShots((prev) => [...prev.filter((s) => s.index !== shot.index), shot]);
+      });
+      source.addEventListener("done", (e) => {
+        const made = JSON.parse((e as MessageEvent).data) as { project: string; shots: SceneShot[] };
+        setProject(made.project);
+        setShots(made.shots);
+        setImgProgress(1);
+        setDrawing(false);
+        source.close();
+      });
+      source.addEventListener("error", (e) => {
+        const raw = (e as MessageEvent).data;
+        if (raw) {
+          setError((JSON.parse(raw) as { error: string }).error);
+          setDrawing(false);
+          source.close();
+        }
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setDrawing(false);
+    }
+  }
+
+  /** One scene again — a different picture, from the same words. */
+  async function onRedraw(index: number) {
+    if (!script || !project) return;
+    setError("");
+    setRedrawing(index);
+    try {
+      const { jobId } = await startSceneImage({
+        project,
+        index,
+        prompt: script.scenes[index].imagePrompt,
+        style: imageStyle,
+      });
+      const source = new EventSource(eventsUrl(jobId));
+      source.addEventListener("done", (e) => {
+        const shot = JSON.parse((e as MessageEvent).data) as SceneShot;
+        setShots((prev) => prev.map((s) => (s.index === index ? shot : s)));
+        setRedrawing(null);
+        source.close();
+      });
+      source.addEventListener("error", (e) => {
+        const raw = (e as MessageEvent).data;
+        if (raw) {
+          setError((JSON.parse(raw) as { error: string }).error);
+          setRedrawing(null);
+          source.close();
+        }
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setRedrawing(null);
+    }
+  }
+
+  /** One scene spoken, so it can be heard now rather than after the render. */
+  async function onSpeak(index: number) {
+    // No project needed: the engine makes one when there is none, which is
+    // what lets a line be heard before any picture has been drawn. This used
+    // to return here, so the button did nothing at all.
+    if (!script) return;
+    setError("");
+    setSpeaking(index);
+    try {
+      const { jobId, project: id } = await startSceneVoice({
+        project: project || undefined,
+        index,
+        text: script.scenes[index].text,
+        voice: { key: voice, style: read, energy: 3, pace, mastering: "broadcast", speed },
+      });
+      // The first line spoken is what starts the project when no pictures
+      // have been drawn; the pictures then join the same one.
+      setProject(id);
+      setVoiceJob(jobId);
+      const source = new EventSource(eventsUrl(jobId));
+      source.addEventListener("done", (e) => {
+        const take = JSON.parse((e as MessageEvent).data) as SceneTake;
+        setTakes((prev) => [...prev.filter((t) => t.index !== index), take]);
+        setSpeaking(null);
+        source.close();
+      });
+      source.addEventListener("error", (e) => {
+        const raw = (e as MessageEvent).data;
+        if (raw) {
+          setError((JSON.parse(raw) as { error: string }).error);
+          setSpeaking(null);
+          source.close();
+        }
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setSpeaking(null);
+    }
+  }
+
+  /**
+   * Open a finished video as the thing it was made from.
+   *
+   * Not just "play this file": the script comes back into the editor, each
+   * picture back into its scene, each spoken line back under it, and the
+   * settings back onto the controls. Changing one line or redrawing one
+   * picture and pressing render then costs that one scene — everything else
+   * is already made and is reused.
+   */
+  function open(item: ShortVideo) {
+    setVideo(item);
+    setError("");
+    setLines([]);
+    setProgress(0);
+    const made = item.request;
+    if (made?.script) setScript(made.script);
+    setProject(item.project ?? "");
+    setShots(item.shots ?? []);
+    setTakes(item.takes ?? []);
+    if (made?.voice) {
+      setVoice(made.voice.key);
+      setRead(made.voice.style ?? "");
+      setPace(made.voice.pace ?? "natural");
+      setSpeed(made.voice.speed ?? 1);
+    }
+    if (made?.visuals?.style !== undefined) setImageStyle(made.visuals.style);
+    if (made?.captions) {
+      setCapOn(made.captions.on);
+      setCapStyle(made.captions.style as "pop" | "minimal" | "boxed");
+      setCapPosition(made.captions.position as "middle" | "bottom");
+      setCapUpper(made.captions.uppercase);
+    }
+    if (made?.music) {
+      setMusicOn(made.music.on);
+      setMusicVolume(made.music.volume);
+    }
+  }
+
   async function onRender() {
     if (!script) return;
     setError("");
@@ -285,12 +569,38 @@ export default function Shorts() {
           colours: { highlight: capHighlight, text: capText },
         },
         music: { on: musicOn, volume: musicVolume },
+        // The pictures that were looked at and kept. Without them the engine
+        // would draw its own, which is the old one-button behaviour.
+        // Whatever has been drawn, in scene order, with a gap where nothing
+        // has. None at all means the engine draws them all, which is the
+        // end-to-end render this button always did.
+        images: shots.length
+          ? script.scenes.map((_, i) => shotFor.get(i)?.name ?? "")
+          : undefined,
+        // The engine finds the kept takes itself, and only uses the ones that
+        // still match these words and these voice settings.
+        project: project || undefined,
       });
+      setRenderJob(jobId);
       const source = new EventSource(eventsUrl(jobId));
       source.addEventListener("log", (e) => {
         const data = JSON.parse((e as MessageEvent).data) as { line: string; progress: number };
         setLines((prev) => [...prev, data.line]);
         setProgress(data.progress);
+      });
+      // A render that draws its own pictures shows them in their scenes as it
+      // goes, exactly as the picture step does — so pressing Make the video
+      // with nothing drawn is still something to watch rather than a bar.
+      source.addEventListener("step", (e) => {
+        const data = JSON.parse((e as MessageEvent).data) as Partial<SceneShot> & {
+          project?: string;
+        };
+        if (data.project && !data.name) {
+          setProject(data.project);
+          return;
+        }
+        const shot = data as SceneShot;
+        setShots((prev) => [...prev.filter((s) => s.index !== shot.index), shot]);
       });
       source.addEventListener("done", (e) => {
         setVideo(JSON.parse((e as MessageEvent).data) as ShortVideo);
@@ -325,6 +635,9 @@ export default function Shorts() {
 
   return (
     <>
+      {preview && (
+        <Preview src={preview.src} caption={preview.caption} onClose={() => setPreview(null)} />
+      )}
       {config && (
         <div className="chips" style={{ marginBottom: 2 }}>
           {([
@@ -489,12 +802,31 @@ export default function Shorts() {
           </button>
         </div>
 
+        {/*
+          * Before a script exists this is an estimate from the length asked
+          * for. Once one exists it is the script itself: the finished video
+          * is as long as the narration turns out to be — the length above is
+          * what Claude was aiming at, never a limit the video is cut to.
+          */}
         <p className="hint muted">
-          {lengthLabel(seconds)} is about {plannedScenes(seconds)} scenes, so{" "}
-          {plannedScenes(seconds)} pictures drawn on this Mac — roughly{" "}
-          <strong>{effortMinutes(seconds, /[ក-៿]/.test(language) || /khmer/i.test(language))} minutes</strong>{" "}
-          to render once the script is written.
-          {seconds > 90 && " A script this long is written in parts, which takes a few minutes of its own."}
+          {script ? (
+            <>
+              The script that came out runs <strong>~{runtime.toFixed(0)}s</strong> over{" "}
+              {script.scenes.length} scenes — that is the length of the video, and{" "}
+              {script.scenes.length} pictures to draw on this Mac, roughly{" "}
+              <strong>{renderMinutes(script.scenes.length, runtime, khmerScript)} minutes</strong>.
+            </>
+          ) : (
+            <>
+              {lengthLabel(seconds)} is about {plannedScenes(seconds)} scenes, so{" "}
+              {plannedScenes(seconds)} pictures drawn on this Mac — roughly{" "}
+              <strong>{effortMinutes(seconds, khmerScript)} minutes</strong> to render once the
+              script is written. The finished video runs as long as the script does, not to the
+              number above.
+              {seconds > 90 &&
+                " A script this long is written in parts, which takes a few minutes of its own."}
+            </>
+          )}
         </p>
 
         {script && (
@@ -511,6 +843,46 @@ export default function Shorts() {
             <div className="scenes">
               {script.scenes.map((scene, i) => (
                 <div className="scene" key={i}>
+                  {/*
+                    * The picture for this scene, beside the words it was
+                    * drawn from. Apart, in a grid of their own, you could see
+                    * that a picture was wrong but not which line it belonged
+                    * to — which is the thing you need in order to fix it.
+                    */}
+                  <div className="scene-shot">
+                    {shotFor.has(i) ? (
+                      <>
+                        <button
+                          className="scene-shot-open"
+                          title="Click to see it full size"
+                          onClick={() =>
+                            setPreview({
+                              src: sceneUrl(shotFor.get(i)!.name),
+                              caption: `Scene ${i + 1} — ${scene.imagePrompt}`,
+                            })
+                          }
+                        >
+                          <img
+                            src={sceneUrl(shotFor.get(i)!.name)}
+                            alt={scene.imagePrompt}
+                            loading="lazy"
+                          />
+                        </button>
+                        <button
+                          className="btn ghost tiny"
+                          disabled={redrawing !== null || drawing || rendering}
+                          onClick={() => onRedraw(i)}
+                        >
+                          {redrawing === i ? "Drawing…" : "Redraw"}
+                        </button>
+                      </>
+                    ) : (
+                      <div className="scene-shot-empty">
+                        {drawing ? "drawing…" : "no picture yet"}
+                      </div>
+                    )}
+                  </div>
+                  <div className="scene-words">
                   <div className="scene-head">
                     <strong>Scene {i + 1}</strong>
                     <div className="scene-tools">
@@ -549,6 +921,43 @@ export default function Shorts() {
                     value={scene.imagePrompt}
                     onChange={(e) => patchScene(i, { imagePrompt: e.target.value })}
                   />
+                  {/*
+                    * Hearing one line costs about ten seconds; hearing it for
+                    * the first time in a finished video costs the render. A
+                    * scene with no take here is simply spoken during the
+                    * render, exactly as before.
+                    */}
+                  <div className="scene-voice">
+                    <button
+                      className="btn ghost tiny"
+                      disabled={speaking !== null || drawing || rendering || !scene.text.trim()}
+                      onClick={() => onSpeak(i)}
+                    >
+                      {speaking === i
+                        ? "Speaking…"
+                        : takeFor.has(i)
+                          ? "Speak again"
+                          : "Generate voice"}
+                    </button>
+                    {speaking === i && voiceJob && (
+                      <Stop
+                        what="speaking"
+                        onClick={async () => {
+                          await cancelJob(voiceJob);
+                          setSpeaking(null);
+                        }}
+                      />
+                    )}
+                    {takeFor.has(i) && (
+                      <>
+                        <audio controls preload="none" src={sceneUrl(takeFor.get(i)!.name)} />
+                        <span className="hint muted" style={{ margin: 0 }}>
+                          {takeFor.get(i)!.seconds.toFixed(1)}s
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  </div>
                 </div>
               ))}
             </div>
@@ -566,6 +975,53 @@ export default function Shorts() {
                 Add scene
               </button>
             </div>
+
+            {/*
+              * The pictures are made from the scenes directly above, so the
+              * button belongs here rather than in a block of its own further
+              * down the page.
+              */}
+            <div className="setup-row">
+              <button
+                className="btn primary"
+                onClick={onImages}
+                disabled={!script || drawing || rendering || blocked}
+              >
+                {drawing
+                  ? "Drawing…"
+                  : ready
+                    ? "Draw them all again"
+                    : `Generate ${script.scenes.length} images`}
+              </button>
+              {drawing && imgJob && (
+                <Stop
+                  what="drawing"
+                  onClick={async () => {
+                    await cancelJob(imgJob);
+                    setDrawing(false);
+                    setImgLines((prev) => [...prev, "Stopped. The pictures already drawn are kept."]);
+                  }}
+                />
+              )}
+              {(drawing || imgProgress > 0) && (
+                <div className="progress">
+                  <i style={{ width: `${Math.round(imgProgress * 100)}%` }} />
+                </div>
+              )}
+              <span className="hint muted" style={{ margin: 0 }}>
+                {drawing
+                  ? `${shots.length}/${script.scenes.length} drawn — each appears in its scene above`
+                  : ready
+                    ? `${shots.length} kept — redraw any one above, or edit its description first`
+                    : `about ${Math.round((script.scenes.length * 40) / 60)} min on this Mac`}
+              </span>
+            </div>
+
+            {imgLines.length > 0 && (
+              <pre className="setup-log" ref={imgLogRef}>
+                {imgLines.join("\n")}
+              </pre>
+            )}
 
             <div className="shorts-row">
               <label className="field grow" style={{ marginTop: 0 }}>
@@ -777,15 +1233,37 @@ export default function Shorts() {
       </Block>
 
       {/* ── 4 ───────────────────────────────────────────────────────────── */}
-      <Block title="Render">
+      <Block
+        title="Render"
+        note={
+          ready
+            ? "Speaks every scene, lays it over the picture you kept, and cuts it together."
+            : shots.length
+              ? "Draws the scenes that have no picture yet, keeps the ones that do, then speaks and cuts it together."
+              : "Does the whole thing: draws every picture, speaks every scene, and cuts it together."
+        }
+      >
         <div className="setup-row" style={{ marginTop: 0 }}>
           <button
             className="btn primary"
             onClick={onRender}
-            disabled={!script || rendering || blocked}
+            disabled={!script || rendering || drawing || blocked}
           >
-            {rendering ? "Rendering…" : "Render the video"}
+            {rendering ? "Rendering…" : ready ? "Generate the video" : "Make the video"}
           </button>
+          {rendering && renderJob && (
+            <Stop
+              what="the render"
+              onClick={async () => {
+                await cancelJob(renderJob);
+                setRendering(false);
+                setLines((prev) => [
+                  ...prev,
+                  "Stopped. The pictures and spoken lines already made are kept.",
+                ]);
+              }}
+            />
+          )}
           {(rendering || progress > 0) && (
             <div className="progress">
               <i style={{ width: `${Math.round(progress * 100)}%` }} />
@@ -807,6 +1285,13 @@ export default function Shorts() {
               <span className="hint muted" style={{ margin: 0 }}>
                 {video.seconds.toFixed(1)}s · {(video.bytes / 1e6).toFixed(1)} MB · 1080×1920
               </span>
+              {/*
+                * What it was made with, read back from the file the engine
+                * saved beside the video. Six months from now "which voice was
+                * that one?" has an answer, and a video worth repeating can be
+                * repeated.
+                */}
+              {madeWith(video) && <span className="made-with">{madeWith(video)}</span>}
               <button className="btn ghost tiny" onClick={() => saveFile(video.file, setError)}>
                 {isTauri() ? "Show the MP4 in Finder" : "Download MP4"}
               </button>
@@ -819,11 +1304,14 @@ export default function Shorts() {
       </Block>
 
       {library.length > 0 && (
-        <Block title="Library" note="Everything rendered on this machine, newest first.">
+        <Block
+          title="Library"
+          note="Everything rendered on this machine, newest first. Open one and it comes back as it was made — script, pictures and spoken lines in their scenes — so changing one thing and rendering again only costs that one thing."
+        >
           <div className="takes">
             {library.map((item) => (
               <div key={item.id} className={video?.id === item.id ? "take active" : "take"}>
-                <button className="take-main" onClick={() => setVideo(item)}>
+                <button className="take-main" onClick={() => open(item)}>
                   <span className="take-text">{item.title}</span>
                   <span className="take-meta">
                     {new Date(item.created).toLocaleString()} · {item.seconds.toFixed(0)}s ·{" "}

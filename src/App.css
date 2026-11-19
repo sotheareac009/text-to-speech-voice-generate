@@ -927,14 +927,48 @@ input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.12); }
 
 /* Scene editor */
 .scenes { display: grid; gap: 8px; margin-top: 14px; }
+/* A scene is its picture and its words, side by side: the picture is only
+   useful next to the line it was drawn from. */
 .scene {
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   background: var(--surface-2);
   padding: 10px 12px;
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.scene-words { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.scene-shot { display: flex; flex-direction: column; gap: 6px; }
+.scene-shot img {
+  display: block;
+  width: 104px;
+  aspect-ratio: 9 / 16;
+  object-fit: cover;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.scene-shot-empty {
+  width: 104px;
+  aspect-ratio: 9 / 16;
   display: flex;
-  flex-direction: column;
-  gap: 7px;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 8px;
+  font-size: 0.68rem;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: var(--r-sm);
+}
+.scene-shot .btn { padding: 4px 6px; font-size: 0.68rem; }
+
+/* On a narrow window the picture goes above the words rather than beside. */
+@media (max-width: 680px) {
+  .scene { grid-template-columns: 1fr; }
+  .scene-shot { flex-direction: row; align-items: center; }
 }
 .scene-head { display: flex; align-items: center; justify-content: space-between; }
 .scene-head strong { font-size: 0.75rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
@@ -1124,3 +1158,135 @@ input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.12); }
 .mode:hover:not(:disabled):not(.on) { color: var(--fg); border-color: var(--accent); }
 .mode.on { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
 .mode:disabled { opacity: 0.55; cursor: default; }
+
+/* The scene pictures, drawn before the video and kept for inspection. */
+.shot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+.shot { margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.shot img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 9 / 16;
+  object-fit: cover;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.shot figcaption {
+  font-size: 0.7rem;
+  line-height: 1.35;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.shot .btn { align-self: stretch; }
+
+/* A thumbnail that opens full size: a button that looks like its picture. */
+.scene-shot-open {
+  display: block;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: zoom-in;
+  line-height: 0;
+  border-radius: var(--r-sm);
+}
+.scene-shot-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.scene-shot-open img { transition: filter var(--fast); }
+.scene-shot-open:hover img { filter: brightness(1.08); }
+
+/* The picture, at the size of the window. */
+.preview {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: rgba(8, 10, 14, 0.82);
+  backdrop-filter: blur(3px);
+  cursor: zoom-out;
+  animation: preview-in 120ms ease-out;
+}
+@keyframes preview-in { from { opacity: 0; } to { opacity: 1; } }
+.preview figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  max-width: 100%;
+  max-height: 100%;
+  cursor: default;
+}
+.preview img {
+  max-width: 100%;
+  /* Room for the caption under it, whatever the window is. */
+  max-height: calc(100vh - 110px);
+  object-fit: contain;
+  border-radius: var(--r-md);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+.preview figcaption {
+  max-width: 620px;
+  text-align: center;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: #d7dde8;
+}
+.preview-close {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background var(--fast);
+}
+.preview-close:hover { background: rgba(255, 255, 255, 0.18); }
+
+/* Per-scene voice: the button, and the take once there is one. */
+.scene-voice { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.scene-voice audio { height: 30px; max-width: 260px; flex: 1 1 180px; }
+
+/* What a finished video was made with, read back from the engine's own file. */
+.made-with {
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--fg-soft);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 6px 9px;
+  max-width: 300px;
+}
+
+/* Stop: sits next to whatever is running, and only while it runs. */
+.stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--bad);
+  cursor: pointer;
+  transition: background var(--fast), border-color var(--fast), color var(--fast);
+}
+.stop:hover { background: var(--bad-soft); border-color: var(--bad); }
+.stop:focus-visible { outline: 2px solid var(--bad); outline-offset: 2px; }

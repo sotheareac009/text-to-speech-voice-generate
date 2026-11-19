@@ -50,13 +50,24 @@ export interface Script {
 
 export interface ShortVideo {
   id: string;
+  /** What it was made of, so opening it restores the whole workbench. */
+  project?: string;
+  shots?: SceneShot[];
+  takes?: SceneTake[];
   file: string;
   srt: string;
   title: string;
   seconds: number;
   bytes: number;
   created: number;
-  request?: { script: Script };
+  /** Everything the video was made with — saved beside it by the engine. */
+  request?: {
+    script: Script;
+    voice?: { key: string; style: string; pace: string; speed: number; energy?: number };
+    visuals?: { style: string };
+    captions?: { on: boolean; style: string; position: string; uppercase: boolean };
+    music?: { on: boolean; volume: number };
+  };
 }
 
 /** Absolute, because the engine is on another origin than this window. */
@@ -116,6 +127,53 @@ export const writeScript = (idea: string, seconds: number, tone: string, languag
 
 export const startRender = (request: unknown) => post<{ jobId: string }>("/api/render", request);
 
+/* ── Scene pictures, made before the video ─────────────────────────────── */
+
+export interface SceneShot {
+  index: number;
+  /** Absent on a shot read back from a finished video: only the name matters. */
+  file?: string;
+  /** What it is served as — see `sceneUrl`. */
+  name: string;
+  source?: string;
+  prompt: string;
+  seed: number;
+}
+
+export const sceneUrl = (name: string) => `${BASE}/scenes/${name}`;
+
+export const startSceneImages = (script: unknown, style: string, project?: string) =>
+  post<{ jobId: string; project: string }>("/api/scene-images", { script, style, project });
+
+export interface SceneTake {
+  index: number;
+  name: string;
+  seconds: number;
+}
+
+export const startSceneVoice = (body: {
+  /** Left out for the first scene spoken: the engine makes one and says so. */
+  project?: string;
+  index: number;
+  text: string;
+  voice: {
+    key: string;
+    style: string;
+    energy: number;
+    pace: string;
+    mastering: string;
+    speed: number;
+  };
+}) => post<{ jobId: string; project: string }>("/api/scene-voice", body);
+
+export const startSceneImage = (body: {
+  project: string;
+  index: number;
+  prompt: string;
+  style: string;
+  seed?: number;
+}) => post<{ jobId: string }>("/api/scene-image", body);
+
 /**
  * Hand a video over to be dubbed.
  *
@@ -139,6 +197,12 @@ export const filePath = (file: string) =>
     if (!r.ok) throw new Error(`The engine could not find ${file}.`);
     return ((await r.json()) as { path: string }).path;
   });
+
+/** Stop a running job. Never removes a finished video — see deleteShort. */
+export const cancelJob = (jobId: string) =>
+  fetch(`${BASE}/api/jobs/${jobId}/cancel`, { method: "POST" })
+    .then((r) => r.json() as Promise<{ cancelled: boolean }>)
+    .catch(() => ({ cancelled: false }));
 
 export const deleteShort = (id: string) =>
   fetch(`${BASE}/api/jobs/${id}`, { method: "DELETE" }).then((r) => r.json());

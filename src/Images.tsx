@@ -15,6 +15,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Block } from "./Block";
+import { Preview } from "./Preview";
 import {
   deletePicture,
   eventsUrl,
@@ -742,9 +743,19 @@ export default function Images() {
 
 /** The thing just made, with what it is and what to do with it. */
 function Result({ picture, onSave }: { picture: Picture; onSave: () => void }) {
+  const [big, setBig] = useState(false);
   return (
     <div className="picture-result">
-      <img src={pictureUrl(picture.file)} alt={picture.prompt} />
+      {big && (
+        <Preview
+          src={pictureUrl(picture.file)}
+          caption={picture.drawn ?? picture.prompt}
+          onClose={() => setBig(false)}
+        />
+      )}
+      <button className="scene-shot-open" title="Click to see it full size" onClick={() => setBig(true)}>
+        <img src={pictureUrl(picture.file)} alt={picture.prompt} />
+      </button>
       <div className="short-side">
         <strong>
           {picture.width}×{picture.height}
