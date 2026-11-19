@@ -25,6 +25,26 @@ import {
 } from "./shortsApi";
 
 const LANGUAGES = ["Khmer", "English", "Thai", "Vietnamese", "French", "Spanish", "Chinese"];
+
+/**
+ * What the uploaded video is spoken in.
+ *
+ * "Detect it" is the default and is right for almost every upload: the
+ * multilingual model works out the language itself. Naming it explicitly only
+ * helps when a video opens on music or noise, where a detector can guess
+ * wrong — and choosing English specifically switches to the English-only
+ * model, which hears English better than the multilingual one.
+ */
+const SOURCES = [
+  { code: "auto", label: "Detect it" },
+  { code: "en", label: "English" },
+  { code: "km", label: "Khmer" },
+  { code: "th", label: "Thai" },
+  { code: "vi", label: "Vietnamese" },
+  { code: "zh", label: "Chinese" },
+  { code: "fr", label: "French" },
+  { code: "es", label: "Spanish" },
+];
 const READS = ["narrative", "friendly", "premium", "announcer", "promo"];
 
 export default function Dub() {
@@ -33,6 +53,7 @@ export default function Dub() {
   const [error, setError] = useState("");
 
   const [file, setFile] = useState<File | null>(null);
+  const [source, setSource] = useState("auto");
   const [language, setLanguage] = useState("Khmer");
   const [voice, setVoice] = useState("male");
   /*
@@ -110,6 +131,7 @@ export default function Dub() {
       const form = new FormData();
       // The file goes last: the engine reads the fields before the stream, and
       // multipart delivers them in the order they were added.
+      form.set("source", source);
       form.set("language", language);
       form.set("voice", voice);
       form.set("style", read);
@@ -117,25 +139,25 @@ export default function Dub() {
       form.set("video", file, file.name);
 
       const { jobId } = await startDub(form);
-      const source = new EventSource(eventsUrl(jobId));
-      source.addEventListener("log", (e) => {
+      const stream = new EventSource(eventsUrl(jobId));
+      stream.addEventListener("log", (e) => {
         const data = JSON.parse((e as MessageEvent).data) as { line: string; progress: number };
         setLines((prev) => [...prev, data.line]);
         setProgress(data.progress);
       });
-      source.addEventListener("done", (e) => {
+      stream.addEventListener("done", (e) => {
         setVideo(JSON.parse((e as MessageEvent).data) as ShortVideo);
         setProgress(1);
         setRunning(false);
-        source.close();
+        stream.close();
         refreshLibrary();
       });
-      source.addEventListener("error", (e) => {
+      stream.addEventListener("error", (e) => {
         const raw = (e as MessageEvent).data;
         if (raw) {
           setError((JSON.parse(raw) as { error: string }).error);
           setRunning(false);
-          source.close();
+          stream.close();
         }
       });
     } catch (e) {
@@ -174,6 +196,18 @@ export default function Dub() {
         note="Each line is translated to fit the seconds it occupies, so every phrase starts on the beat the original started on. Leave the read undirected unless you want a performance: directing it makes the voice change character between lines."
       >
         <div className="shorts-row" style={{ marginTop: 0 }}>
+          <label className="field" style={{ marginTop: 0 }}>
+            <span>Spoken in</span>
+            <span className="select-wrap">
+              <select value={source} onChange={(e) => setSource(e.target.value)}>
+                {SOURCES.map((s) => (
+                  <option key={s.code} value={s.code}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+            </span>
+          </label>
           <label className="field" style={{ marginTop: 0 }}>
             <span>Into</span>
             <span className="select-wrap">
