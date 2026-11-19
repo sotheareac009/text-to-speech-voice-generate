@@ -24,10 +24,13 @@ React UI  ──HTTP──▶  Python engine (127.0.0.1:8008)  ──▶  VoxCPM
 
 - **30 languages including Khmer** — the language is detected from the text, so
   there's nothing to select.
-- **Three premium lead voices** — "main character" rather than utility
+- **Eight built-in lead voices** — "main character" rather than utility
   announcer: designed from a description, then cached so the same voice comes
-  back every time.
-- **Voice cloning** from a 20–30s clip.
+  back every time. One female and seven male registers, from Authority
+  (80–130 Hz) to Bright (125–190 Hz).
+- **Voice cloning** from a 20–30s clip. A saved clone is offered in the picker
+  beside the built-in voices and can be used by anything that drives the
+  engine, including Shorts Studio's renders and dubs.
 - **Khmer number normalisation** — `ថ្ងៃទី12` → `ថ្ងៃទីដប់ពីរ`,
   `ឆ្នាំ2026` → `ឆ្នាំពីរពាន់ម្ភៃប្រាំមួយ`. Without this, digits come out garbled.
 - **Mixed Khmer/English** — each script run is normalised in its own language,
@@ -62,6 +65,17 @@ retail spot or as a premium brand tag. Five presets:
 **Energy** (1–5) and **pace** add their own phrases to the instruction and
 nudge the guidance scale; each preset starts at the settings that suit it, so
 picking one is enough. The panel shows the exact instruction being sent.
+
+**What pace can and cannot do.** Pace is two things: a phrase in the
+instruction ("slower, deliberate pace") and the silence left between
+sentences — 0.30s slow, 0.18s natural, 0.10s fast
+([styles.py](python/styles.py)). The pause is the part that always lands. The
+phrase is only a nudge, because the speaking rate inside a sentence is carried
+mostly by the reference clip the voice is pinned to, and that clip does not
+change with the setting. So pace moves the overall length of a read, not the
+tempo of a given line. Anything that has to hit an exact duration — dubbing a
+line onto the original speaker's beat, for one — stretches the finished audio
+instead of asking for a different pace.
 
 **Mastering.** The raw output has wide level swings, thin presence, no fixed
 delivery level and peaks wherever the model put them. The chain is
@@ -201,14 +215,22 @@ the gate still catches what the model itself generates between words.
 
 ### The built-in voices
 
-Both are designed from a description rather than shipped as audio, since
+All eight are designed from a description rather than shipped as audio, since
 VoxCPM2 can invent a voice from text alone:
 
-| | Description | f0 target |
-| --- | --- | --- |
-| **Lead female** | young adult, warm and resonant, composed and confident, cinematic narrator | 165–265 Hz |
-| **Lead male** | a man in his thirties, warm and resonant, clear and confident, cinematic narrator | 90–150 Hz |
-| **Young male** | a young man of about twenty-three, bright and warm, clear and confident, cinematic narrator | 115–175 Hz |
+| | Group | Variant | f0 target |
+| --- | --- | --- | --- |
+| **Lead female** | Female | Lead | 165–265 Hz |
+| **Lead male** | Male | Lead (30s) | 90–150 Hz |
+| **Young male** | Male | Young (23) | 115–175 Hz |
+| **Authority** | Male | Authority (late 40s) | 80–130 Hz |
+| **Gentle** | Male | Gentle (30s) | 100–155 Hz |
+| **Bright** | Male | Bright (26) | 125–190 Hz |
+| **Rough** | Male | Rough (40s) | 85–135 Hz |
+| **Elder** | Male | Elder (65) | 95–145 Hz |
+
+The descriptions themselves are in [voices.py](python/voices.py); each is a
+sentence of gender, age, tone and pace handed to VoxCPM2's voice design.
 
 The picker shows one button per `group` and a dropdown for that group's
 variants, so **Male** carries both male voices rather than each voice taking its

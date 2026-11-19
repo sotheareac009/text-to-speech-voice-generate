@@ -37,6 +37,7 @@ import {
 import { Block } from "./Block";
 import Shorts from "./Shorts";
 import Dub from "./Dub";
+import Images from "./Images";
 import "./App.css";
 
 /** A built-in voice key from the engine's catalog, or "upload" to clone. */
@@ -148,7 +149,7 @@ function loadTakes(): Take[] {
  * where files go, which theme — lives in Settings, so the screen you work on
  * holds only the things that change between one take and the next.
  */
-type Page = "studio" | "voices" | "direction" | "shorts" | "dub" | "settings";
+type Page = "studio" | "voices" | "direction" | "shorts" | "dub" | "images" | "settings";
 
 const PAGES: { key: Page; label: string; title: string; blurb: string }[] = [
   {
@@ -182,6 +183,13 @@ const PAGES: { key: Page; label: string; title: string; blurb: string }[] = [
     title: "Dub a video",
     blurb:
       "Upload a video and get it back speaking another language, in time with the picture.",
+  },
+  {
+    key: "images",
+    label: "Pictures",
+    title: "Pictures",
+    blurb:
+      "Describe a picture and it is drawn here on this Mac — no account, no cost per image, no watermark.",
   },
   {
     key: "settings",
@@ -1067,6 +1075,9 @@ function App() {
           {/* ── Dub ────────────────────────────────────────────────────── */}
           {page === "dub" && <Dub />}
 
+          {/* ── Pictures ───────────────────────────────────────────────── */}
+          {page === "images" && <Images />}
+
           {/* ── Settings ───────────────────────────────────────────────── */}
           {page === "settings" && (
             <>
@@ -1233,6 +1244,14 @@ function Icon({ name }: { name: Page | "sun" | "moon" }) {
         <svg {...common}>
           <path d="M4 7.5h7.5M4 12h5M4 16.5h7.5" />
           <path d="M15.5 8.2a4.5 4.5 0 0 1 0 7.6M18.4 5.6a8 8 0 0 1 0 12.8" />
+        </svg>
+      );
+    case "images":
+      return (
+        <svg {...common}>
+          <rect x="3" y="4.5" width="18" height="15" rx="2.4" />
+          <circle cx="8.6" cy="9.8" r="1.6" />
+          <path d="m3.6 17.4 4.6-4.3 3.3 3 3.2-3.6 5.3 5" />
         </svg>
       );
     case "settings":

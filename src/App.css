@@ -991,3 +991,136 @@ input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.12); }
   vertical-align: -1px;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
 }
+
+/* ===========================================================================
+   Pictures — drawn on this machine
+   ========================================================================= */
+
+/* The description box. Roomy, because a good prompt is a sentence or three. */
+.prompt-box {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+/* Suggested additions to the description, as buttons rather than magic. */
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.chip {
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--fg-soft);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: border-color var(--fast), color var(--fast), background var(--fast);
+}
+.chip:hover:not(:disabled) { color: var(--fg); border-color: var(--accent); }
+.chip:disabled { opacity: 0.5; cursor: default; }
+
+.seed-input {
+  font: inherit;
+  width: 112px;
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 9px 12px;
+  font-size: 0.87rem;
+  outline: none;
+  transition: border-color var(--fast), box-shadow var(--fast);
+}
+.seed-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.seed-input::placeholder { color: var(--muted); }
+
+/* The picture just drawn, beside what it is and what to do with it. */
+.picture-result { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 14px; }
+.picture-result img {
+  width: 260px;
+  max-height: 440px;
+  object-fit: contain;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+/* Everything drawn before, as tiles that keep their own shape. */
+.picture-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+.picture-tile { position: relative; margin: 0; min-width: 0; }
+.picture-tile > button:first-child {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color var(--fast), transform var(--fast);
+}
+.picture-tile > button:first-child:hover { border-color: var(--accent); transform: translateY(-2px); }
+.picture-tile img { display: block; width: 100%; aspect-ratio: 3 / 4; object-fit: cover; }
+.picture-tile.active > button:first-child { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+/* Two lines of the description, so a tile is identifiable without a hover. */
+.picture-tile figcaption {
+  margin-top: 6px;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.picture-tile .take-drop {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--surface);
+  opacity: 0;
+  transition: opacity var(--fast), color var(--fast), background var(--fast);
+}
+.picture-tile:hover .take-drop,
+.picture-tile .take-drop:focus-visible { opacity: 1; }
+
+/* What was actually sent to the model, when it differs from what was typed. */
+.drawn-as {
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: var(--fg-soft);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 7px 9px;
+  max-width: 320px;
+}
+.drawn-as strong { color: var(--muted); font-weight: 600; margin-right: 4px; }
+
+/* Picture or poster: two different jobs, chosen before anything else. */
+.mode-row { display: flex; gap: 8px; margin-bottom: 16px; }
+.mode {
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--fg-soft);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 8px 18px;
+  cursor: pointer;
+  transition: color var(--fast), border-color var(--fast), background var(--fast);
+}
+.mode:hover:not(:disabled):not(.on) { color: var(--fg); border-color: var(--accent); }
+.mode.on { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+.mode:disabled { opacity: 0.55; cursor: default; }

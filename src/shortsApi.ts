@@ -61,6 +61,7 @@ export interface ShortVideo {
 
 /** Absolute, because the engine is on another origin than this window. */
 export const videoUrl = (file: string) => `${BASE}/videos/${file}`;
+export const pictureUrl = (file: string) => `${BASE}/pictures/${file}`;
 
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -153,4 +154,106 @@ export function estimateSeconds(script: Script): number {
   const text = script.scenes.map((s) => s.text).join(" ");
   if (/[ក-៿]/.test(text)) return [...text.replace(/\s/g, "")].length / 16;
   return text.split(/\s+/).filter(Boolean).length / 2.5;
+}
+
+
+/* ── Pictures ─────────────────────────────────────────────────────────────
+ *
+ * A picture drawn by the model on this Mac. The engine answers with a job id
+ * rather than the picture, because one takes about forty seconds and WebKit
+ * abandons a request at sixty.
+ */
+
+export interface PictureSize {
+  key: string;
+  label: string;
+  width: number;
+  height: number;
+}
+
+export interface Picture {
+  id: string;
+  file: string;
+  prompt: string;
+  /** What was actually drawn, when Claude put the description into English. */
+  drawn?: string;
+  /** Words set on the picture afterwards, in a real font. */
+  text?: string;
+  size: string;
+  width: number;
+  height: number;
+  seed: number;
+  steps: number;
+  model: string;
+  seconds: number;
+  bytes: number;
+  created: number;
+}
+
+export interface PictureDesk {
+  sizes: PictureSize[];
+  model: string;
+  steps: number;
+  /** False when the model has not been installed on this machine yet. */
+  ready: boolean;
+  items: Picture[];
+}
+
+export const getPictures = () =>
+  fetch(`${BASE}/api/pictures`).then((r) => {
+    if (!r.ok) throw new Error(`The shorts engine answered ${r.status}.`);
+    return r.json() as Promise<PictureDesk>;
+  });
+
+export const startPicture = (body: {
+  prompt: string;
+  size: string;
+  steps: number;
+  seed?: number;
+  improve: boolean;
+  khmer: boolean;
+  text?: string;
+  textPlace?: string;
+}) => post<{ jobId: string }>("/api/picture", body);
+
+/** Where a picture is on disk, for showing it in Finder. */
+export const picturePath = (file: string) =>
+  fetch(`${BASE}/api/pictures/${encodeURIComponent(file)}/path`).then(async (r) => {
+    if (!r.ok) throw new Error(`The engine could not find ${file}.`);
+    return ((await r.json()) as { path: string }).path;
+  });
+
+export const deletePicture = (id: string) =>
+  fetch(`${BASE}/api/pictures/${id}`, { method: "DELETE" }).then((r) => r.json());
+
+/** A poster: real type at an exact size, the model used only for a background. */
+export const startPoster = (body: {
+  heading: string;
+  sub?: string;
+  colour?: string;
+  width: number;
+  height: number;
+  background?: string;
+  place?: string;
+  steps?: number;
+  layout?: string;
+  hero?: string;
+  call?: string;
+  phoneLabel?: string;
+  phone?: string;
+  telegramLabel?: string;
+  telegram?: string;
+  website?: string;
+}) => post<{ jobId: string }>("/api/poster", body);
+
+/** Put a product shot where the engine can reach it; returns its path. */
+export async function uploadImage(file: File): Promise<string> {
+  const form = new FormData();
+  form.set("image", file, file.name);
+  const res = await fetch(`${BASE}/api/upload`, { method: "POST", body: form });
+  if (!res.ok) {
+    const detail = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(detail.error || `The engine answered ${res.status}.`);
+  }
+  return ((await res.json()) as { path: string }).path;
 }

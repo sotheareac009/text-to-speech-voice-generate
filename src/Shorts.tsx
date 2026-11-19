@@ -36,7 +36,37 @@ import {
 } from "./shortsApi";
 
 const PLATFORMS = ["TikTok", "YouTube Shorts", "Instagram Reels"];
-const LENGTHS = [30, 45, 60];
+const LENGTHS = [30, 45, 60, 90, 120, 180, 240, 300];
+
+/** How a length reads to a person: seconds up to a minute, then minutes. */
+function lengthLabel(s: number): string {
+  if (s < 60) return `~${s} seconds`;
+  const m = s / 60;
+  return m % 1 === 0 ? `~${m} minute${m > 1 ? "s" : ""}` : `~${m.toFixed(1)} minutes`;
+}
+
+/**
+ * Scenes for a length — the same rule the engine uses, so the estimate shown
+ * here is the work that will actually happen rather than a guess.
+ */
+function plannedScenes(seconds: number): number {
+  if (seconds <= 75) return Math.max(5, Math.min(14, Math.round(seconds / 4.5)));
+  return Math.max(14, Math.min(44, Math.round(seconds / 7)));
+}
+
+/**
+ * Roughly how long this Mac needs, in minutes.
+ *
+ * Shown before the render rather than discovered during it: a picture is
+ * about forty seconds on this machine — measured, not assumed — so a long
+ * video is mostly spent drawing, and that is worth knowing before pressing
+ * the button rather than twenty minutes in.
+ */
+function effortMinutes(seconds: number, khmer: boolean): number {
+  const drawing = (plannedScenes(seconds) * 40) / 60;
+  const speaking = seconds / (khmer ? 60 : 75);
+  return Math.round((drawing + speaking + 0.4 + seconds / 180) * 10) / 10;
+}
 const LANGUAGES = ["Khmer", "English", "Thai", "Vietnamese", "French", "Chinese"];
 const TONES = [
   "Curious and punchy",
@@ -424,7 +454,7 @@ export default function Shorts() {
               <select value={seconds} onChange={(e) => setSeconds(Number(e.target.value))}>
                 {LENGTHS.map((s) => (
                   <option key={s} value={s}>
-                    ~{s} seconds
+                    {lengthLabel(s)}
                   </option>
                 ))}
               </select>
@@ -458,6 +488,14 @@ export default function Shorts() {
             {writing ? "Writing…" : script ? "Rewrite" : "Write script"}
           </button>
         </div>
+
+        <p className="hint muted">
+          {lengthLabel(seconds)} is about {plannedScenes(seconds)} scenes, so{" "}
+          {plannedScenes(seconds)} pictures drawn on this Mac — roughly{" "}
+          <strong>{effortMinutes(seconds, /[ក-៿]/.test(language) || /khmer/i.test(language))} minutes</strong>{" "}
+          to render once the script is written.
+          {seconds > 90 && " A script this long is written in parts, which takes a few minutes of its own."}
+        </p>
 
         {script && (
           <>
