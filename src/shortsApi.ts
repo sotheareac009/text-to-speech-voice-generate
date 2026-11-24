@@ -65,6 +65,7 @@ export interface ShortVideo {
     script: Script;
     voice?: { key: string; style: string; pace: string; speed: number; energy?: number };
     visuals?: { style: string };
+    transition?: { name: string; seconds: number };
     captions?: { on: boolean; style: string; position: string; uppercase: boolean };
     music?: { on: boolean; volume: number };
   };
@@ -310,10 +311,15 @@ export const startPoster = (body: {
   website?: string;
 }) => post<{ jobId: string }>("/api/poster", body);
 
-/** Put a product shot where the engine can reach it; returns its path. */
-export async function uploadImage(file: File): Promise<string> {
+/**
+ * Put a file where the engine can reach it; returns its path there.
+ *
+ * Pictures for a poster, music for a video — the engine accepts either and
+ * keeps it in its work folder under a name of its own choosing.
+ */
+export async function uploadFile(file: File): Promise<string> {
   const form = new FormData();
-  form.set("image", file, file.name);
+  form.set("file", file, file.name);
   const res = await fetch(`${BASE}/api/upload`, { method: "POST", body: form });
   if (!res.ok) {
     const detail = (await res.json().catch(() => ({}))) as { error?: string };
@@ -321,3 +327,6 @@ export async function uploadImage(file: File): Promise<string> {
   }
   return ((await res.json()) as { path: string }).path;
 }
+
+/** The old name, kept so the poster page does not have to change. */
+export const uploadImage = uploadFile;

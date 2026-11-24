@@ -30,6 +30,7 @@ import {
   startSceneImages,
   startSceneVoice,
   cancelJob,
+  uploadFile,
   type SceneTake,
   sceneUrl,
   type SceneShot,
@@ -102,6 +103,33 @@ const CAPTION_STYLES = [
   { key: "minimal", label: "Minimal" },
   { key: "boxed", label: "Boxed" },
 ] as const;
+/**
+ * What happens between one scene and the next.
+ *
+ * The same names the engine knows; it checks them again and falls back to a
+ * cut, so a stale page cannot ask for something that is not there.
+ */
+const TRANSITIONS = [
+  { key: "cut", label: "Cut" },
+  { key: "dissolve", label: "Dissolve" },
+  { key: "black", label: "Dip to black" },
+  { key: "flash", label: "Flash" },
+  { key: "zoomin", label: "Zoom in" },
+  { key: "zoomout", label: "Zoom out" },
+  { key: "slide", label: "Slide up" },
+  { key: "across", label: "Slide across" },
+  { key: "wipe", label: "Soft wipe" },
+  { key: "iris", label: "Iris" },
+  { key: "whip", label: "Whip" },
+] as const;
+
+/** How long one transition takes. */
+const TRANSITION_SPEEDS = [
+  { seconds: 0.25, label: "Quick" },
+  { seconds: 0.4, label: "Normal" },
+  { seconds: 0.7, label: "Slow" },
+] as const;
+
 /** Ready-made highlight colours; the first is the one funshort uses. */
 const HIGHLIGHTS = [
   { hex: "#FCE401", label: "Funshort yellow" },
@@ -155,6 +183,10 @@ function madeWith(video: ShortVideo): string {
   if (r.voice?.pace && r.voice.pace !== "natural") bits.push(`${r.voice.pace} pace`);
   if (r.voice?.speed && Math.abs(r.voice.speed - 1) > 0.01) bits.push(`${r.voice.speed}×`);
   if (r.visuals?.style) bits.push(r.visuals.style);
+  if (r.transition) {
+    const look = TRANSITIONS.find((t) => t.key === r.transition?.name);
+    if (look) bits.push(look.key === "cut" ? "hard cuts" : look.label.toLowerCase());
+  }
   if (r.captions) bits.push(r.captions.on ? `${r.captions.style} captions` : "no captions");
   if (r.music) bits.push(r.music.on ? `music ${Math.round(r.music.volume * 100)}%` : "no music");
   return bits.join(" · ");
@@ -205,6 +237,8 @@ export default function Shorts() {
   const [pace, setPace] = useKept("pace", "natural");
   const [speed, setSpeed] = useKept("speed", 1);
   const [imageStyle, setImageStyle] = useKept("imageStyle", IMAGE_STYLES[0].key);
+  const [transition, setTransition] = useKept("transition", "dissolve");
+  const [transSeconds, setTransSeconds] = useKept("transSeconds", 0.4);
   const [capOn, setCapOn] = useKept("capOn", true);
   const [capStyle, setCapStyle] = useKept<"pop" | "minimal" | "boxed">("capStyle", "pop");
   const [capPosition, setCapPosition] = useKept<"middle" | "bottom">("capPosition", "middle");
@@ -213,7 +247,17 @@ export default function Shorts() {
   const [capHighlight, setCapHighlight] = useKept("capHighlight", "#FCE401");
   const [capText, setCapText] = useKept("capText", "#FFFFFF");
   const [musicOn, setMusicOn] = useKept("musicOn", true);
-  const [musicVolume, setMusicVolume] = useKept("musicVolume", 0.15);
+  const [musicVolume, setMusicVolume] = useKept("musicLevel", 0.2);
+  /*
+   * A track of your own.
+   *
+   * The generated bed is sine pads behind a low-pass, and in a finished video
+   * it measured -61 dB — not quiet, absent. Real music is what people mean by
+   * background music. Kept as a path on the engine, with its name for the
+   * label, and remembered so the same track is used for the next video too.
+   */
+  const [musicFile, setMusicFile] = useKept<{ name: string; path: string } | null>("musicFile", null);
+  const musicRef = useRef<HTMLInputElement>(null);
 
   const [rendering, setRendering] = useState(false);
 
@@ -260,6 +304,16 @@ export default function Shorts() {
   const [imgJob, setImgJob] = useState("");
   const [voiceJob, setVoiceJob] = useState("");
   const [renderJob, setRenderJob] = useState("");
+  /*
+   * Speak it all again, even though the lines have not changed.
+   *
+   * Takes are normally reused, which is what makes a second render cheap. But
+   * a take is one roll of the model: a line can simply come out wrong, or in
+   * a voice that sits oddly against the others, and the words being identical
+   * is exactly why it would otherwise be kept forever. This is the way to ask
+   * for a fresh reading without having to change the words to get one.
+   */
+  const [freshVoice, setFreshVoice] = useState(false);
   const [progress, setProgress] = useState(0);
   const [lines, setLines] = useState<string[]>([]);
   const [video, setVideo] = useState<ShortVideo | null>(null);
@@ -355,6 +409,31 @@ export default function Shorts() {
     const scenes = [...script.scenes];
     [scenes[index], scenes[target]] = [scenes[target], scenes[index]];
     setScript({ ...script, scenes });
+    // The picture and the spoken line belong to the scene, not to the slot,
+    // so they move with it. Without this, reordering two scenes would swap
+    // their words and leave their pictures behind.
+    const swap = <T extends { index: number }>(list: T[]) =>
+      list.map((item) =>
+        item.index === index
+          ? { ...item, index: target }
+          : item.index === target
+            ? { ...item, index }
+            : item,
+      );
+    setShots(swap);
+    setTakes(swap);
+  }
+
+  /** Remove a scene, and the picture and spoken line that were its own. */
+  function dropScene(index: number) {
+    if (!script || script.scenes.length <= 1) return;
+    setScript({ ...script, scenes: script.scenes.filter((_, j) => j !== index) });
+    const after = <T extends { index: number }>(list: T[]) =>
+      list
+        .filter((item) => item.index !== index)
+        .map((item) => (item.index > index ? { ...item, index: item.index - 1 } : item));
+    setShots(after);
+    setTakes(after);
   }
 
   /**
@@ -390,6 +469,28 @@ export default function Shorts() {
 
   /** Start a render and follow its log over SSE. */
   /** Step two: every scene's picture, kept where they can be looked at. */
+  /**
+   * A newly written script, and nothing kept from the last one.
+   *
+   * Pictures and spoken lines are held by scene number, not by what they
+   * show or say, so a rewrite that happens to have the same number of scenes
+   * would hand scene 3's old picture to whatever scene 3 has become — the
+   * wrong picture under the right words, discovered only in the finished
+   * video. The takes would sort themselves out, because a take is matched on
+   * its words and the words changed; the pictures would not.
+   */
+  function startFresh(written: Script) {
+    setScript(written);
+    setShots([]);
+    setTakes([]);
+    setProject("");
+    setVideo(null);
+    setImgLines([]);
+    setImgProgress(0);
+    setLines([]);
+    setProgress(0);
+  }
+
   async function onImages() {
     if (!script) return;
     setError("");
@@ -530,6 +631,7 @@ export default function Shorts() {
     setProject(item.project ?? "");
     setShots(item.shots ?? []);
     setTakes(item.takes ?? []);
+    setFreshVoice(false);
     if (made?.voice) {
       setVoice(made.voice.key);
       setRead(made.voice.style ?? "");
@@ -537,6 +639,10 @@ export default function Shorts() {
       setSpeed(made.voice.speed ?? 1);
     }
     if (made?.visuals?.style !== undefined) setImageStyle(made.visuals.style);
+    if (made?.transition) {
+      setTransition(made.transition.name);
+      if (made.transition.seconds) setTransSeconds(made.transition.seconds);
+    }
     if (made?.captions) {
       setCapOn(made.captions.on);
       setCapStyle(made.captions.style as "pop" | "minimal" | "boxed");
@@ -561,6 +667,7 @@ export default function Shorts() {
         script,
         voice: { key: voice, style: read, energy: 3, pace, mastering: "broadcast", speed },
         visuals: { style: imageStyle },
+        transition: { name: transition, seconds: transSeconds },
         captions: {
           on: capOn,
           style: capStyle,
@@ -568,7 +675,7 @@ export default function Shorts() {
           uppercase: capUpper,
           colours: { highlight: capHighlight, text: capText },
         },
-        music: { on: musicOn, volume: musicVolume },
+        music: { on: musicOn, volume: musicVolume, file: musicFile?.path },
         // The pictures that were looked at and kept. Without them the engine
         // would draw its own, which is the old one-button behaviour.
         // Whatever has been drawn, in scene order, with a gap where nothing
@@ -580,6 +687,7 @@ export default function Shorts() {
         // The engine finds the kept takes itself, and only uses the ones that
         // still match these words and these voice settings.
         project: project || undefined,
+        respeak: freshVoice,
       });
       setRenderJob(jobId);
       const source = new EventSource(eventsUrl(jobId));
@@ -796,7 +904,7 @@ export default function Shorts() {
           <button
             className="btn primary"
             disabled={writing || !idea.trim()}
-            onClick={() => run(() => writeScript(idea, seconds, tone, language), setWriting, setScript)}
+            onClick={() => run(() => writeScript(idea, seconds, tone, language), setWriting, startFresh)}
           >
             {writing ? "Writing…" : script ? "Rewrite" : "Write script"}
           </button>
@@ -897,9 +1005,7 @@ export default function Shorts() {
                         ↓
                       </button>
                       <button
-                        onClick={() =>
-                          setScript({ ...script, scenes: script.scenes.filter((_, j) => j !== i) })
-                        }
+                        onClick={() => dropScene(i)}
                         disabled={script.scenes.length <= 1}
                         title="Delete scene"
                       >
@@ -1139,6 +1245,42 @@ export default function Shorts() {
           ))}
         </div>
 
+        <div className="shorts-row" style={{ marginTop: 12 }}>
+          <label className="field grow" style={{ marginTop: 0 }}>
+            <span>Between scenes</span>
+            <span className="select-wrap">
+              <select value={transition} onChange={(e) => setTransition(e.target.value)}>
+                {TRANSITIONS.map((t) => (
+                  <option key={t.key} value={t.key}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            </span>
+          </label>
+          <label className="field" style={{ marginTop: 0 }}>
+            <span>Length</span>
+            <span className="select-wrap">
+              <select
+                value={transSeconds}
+                disabled={transition === "cut"}
+                onChange={(e) => setTransSeconds(Number(e.target.value))}
+              >
+                {TRANSITION_SPEEDS.map((s) => (
+                  <option key={s.seconds} value={s.seconds}>
+                    {s.label} — {s.seconds}s
+                  </option>
+                ))}
+              </select>
+            </span>
+          </label>
+        </div>
+        <p className="hint muted">
+          {transition === "cut"
+            ? "Scenes cut straight from one to the next — the quickest to render."
+            : "Centred on the cut: every scene still starts at the same second it would with hard cuts."}
+        </p>
+
         <h3 className="sub-head">Captions</h3>
         <div className="shorts-row" style={{ marginTop: 10 }}>
           <label className="switch">
@@ -1213,11 +1355,16 @@ export default function Shorts() {
               checked={musicOn}
               onChange={(e) => setMusicOn(e.target.checked)}
             />
-            <span>Ambient bed, generated here</span>
+            <span>{musicFile ? "Music under the voice" : "Ambient bed, generated here"}</span>
           </label>
-          <label className="knob" style={{ flex: "1 1 200px" }}>
+          <label className="knob" style={{ flex: "1 1 240px" }}>
             <span>
-              Volume — <strong>{Math.round(musicVolume * 100)}%</strong>
+              Volume — <strong>{Math.round(musicVolume * 100)}%</strong>{" "}
+              <span className="muted">
+                {musicVolume > 0
+                  ? `${Math.round(-20 * Math.log10(musicVolume))} dB under the voice while it speaks`
+                  : "silent"}
+              </span>
             </span>
             <input
               type="range"
@@ -1230,6 +1377,43 @@ export default function Shorts() {
             />
           </label>
         </div>
+
+        <input
+          ref={musicRef}
+          type="file"
+          accept="audio/*"
+          hidden
+          onChange={async (e) => {
+            const chosen = e.target.files?.[0];
+            if (!chosen) return;
+            try {
+              setMusicFile({ name: chosen.name, path: await uploadFile(chosen) });
+              setMusicOn(true);
+            } catch (err) {
+              setError(err instanceof Error ? err.message : String(err));
+            }
+          }}
+        />
+        <div className="sample-row">
+          <button className="btn ghost" onClick={() => musicRef.current?.click()} disabled={rendering}>
+            Choose a music file…
+          </button>
+          <span className={musicFile ? "sample-name ok" : "sample-name"}>
+            {musicFile ? `✓ ${musicFile.name}` : "None — the generated bed is used"}
+          </span>
+          {musicFile && (
+            <button className="btn ghost tiny" onClick={() => setMusicFile(null)}>
+              Remove
+            </button>
+          )}
+        </div>
+        <p className="hint muted">
+          Any length — it starts at the strongest part of the track, loops or is cut to fit, and
+          fades up from silence. It is brought to the voice's own loudness first, so the slider is
+          a real distance under the voice rather than a fraction of whatever the track was
+          mastered at. 20% is 14 dB under while a line is being spoken — a bed you hear without
+          listening for it — and it comes back up in the gaps on its own.
+        </p>
       </Block>
 
       {/* ── 4 ───────────────────────────────────────────────────────────── */}
@@ -1237,7 +1421,7 @@ export default function Shorts() {
         title="Render"
         note={
           ready
-            ? "Speaks every scene, lays it over the picture you kept, and cuts it together."
+            ? "Lays the voice over the pictures you kept and cuts it together. Lines already spoken are reused unless you ask for them again."
             : shots.length
               ? "Draws the scenes that have no picture yet, keeps the ones that do, then speaks and cuts it together."
               : "Does the whole thing: draws every picture, speaks every scene, and cuts it together."
@@ -1251,6 +1435,15 @@ export default function Shorts() {
           >
             {rendering ? "Rendering…" : ready ? "Generate the video" : "Make the video"}
           </button>
+          <label className="switch" style={{ marginLeft: 4 }}>
+            <input
+              type="checkbox"
+              checked={freshVoice}
+              disabled={rendering || drawing}
+              onChange={(e) => setFreshVoice(e.target.checked)}
+            />
+            <span>Speak every scene again</span>
+          </label>
           {rendering && renderJob && (
             <Stop
               what="the render"

@@ -119,9 +119,20 @@ STYLES: dict[str, Style] = {
         key="funny",
         label="Fun fact",
         blurb="Playful and amused, like telling a friend something they won't believe.",
+        # Rewritten after listening to the first video made with it.
+        #
+        # "a grin in the voice" and "light and animated" were read by the model
+        # as instructions to *perform*: it laughed over its own words and raced
+        # through the line — a 59-character Khmer sentence came out in 2.9s,
+        # about twenty characters a second, where this voice reads fourteen or
+        # fifteen. Rushed and laughing is not funny, it is unintelligible.
+        #
+        # So the amusement is still asked for, but as a quality of the person
+        # rather than a performance, and clarity is now stated outright.
         describe=(
-            "playful amused voice, smiling and warm, telling a friend something "
-            "surprising, light and animated, a grin in the voice, gently teasing"
+            "amused friendly voice, warm and smiling, sharing something "
+            "surprising with a friend, unhurried and clear, every word distinct, "
+            "dry understated humour, never laughing over the words"
         ),
         # Base, before energy 4 adds its own +0.2 — which lands the read at
         # 2.2: above the storyteller's 1.9 so the playfulness is actually
@@ -131,10 +142,11 @@ STYLES: dict[str, Style] = {
         # the joke. Not light either — a short has music under it.
         mastering="broadcast",
         energy=4,
-        # The pause matters more here than the speed. Natural leaves 0.18s
-        # between sentences, which is the beat a punchline needs; fast closes
-        # it to 0.10s and the surprise arrives before anyone is ready for it.
-        pace="natural",
+        # Slow, not natural. The first version used natural and the read came
+        # out 20% shorter than the words needed. Slow adds "slower, deliberate
+        # pace" to the instruction and 0.30s between sentences — which is both
+        # the brake this read needs and the beat a punchline lands on.
+        pace="slow",
     ),
     "testimonial": Style(
         key="testimonial",
