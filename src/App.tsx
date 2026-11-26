@@ -36,6 +36,8 @@ import {
 } from "./install";
 import { Block } from "./Block";
 import Shorts from "./Shorts";
+import Motion from "./Motion";
+import Explainer from "./Explainer";
 import Dub from "./Dub";
 import Images from "./Images";
 import "./App.css";
@@ -149,7 +151,7 @@ function loadTakes(): Take[] {
  * where files go, which theme — lives in Settings, so the screen you work on
  * holds only the things that change between one take and the next.
  */
-type Page = "studio" | "voices" | "direction" | "shorts" | "dub" | "images" | "settings";
+type Page = "studio" | "voices" | "direction" | "shorts" | "motion" | "explainer" | "dub" | "images" | "settings";
 
 const PAGES: { key: Page; label: string; title: string; blurb: string }[] = [
   {
@@ -176,6 +178,20 @@ const PAGES: { key: Page; label: string; title: string; blurb: string }[] = [
     title: "Faceless shorts",
     blurb:
       "An idea becomes a vertical video — Claude writes it, your voices read it, and it is rendered here.",
+  },
+  {
+    key: "motion",
+    label: "Motion",
+    title: "Motion films",
+    blurb:
+      "An explainer drawn rather than photographed — typography, diagrams and glow, rendered frame by frame.",
+  },
+  {
+    key: "explainer",
+    label: "Explainer",
+    title: "Explainers",
+    blurb:
+      "An idea becomes a product demo — Claude writes the animation itself, camera and all, and renders it with motion blur.",
   },
   {
     key: "dub",
@@ -1072,6 +1088,12 @@ function App() {
           {/* ── Shorts ─────────────────────────────────────────────────── */}
           {page === "shorts" && <Shorts />}
 
+          {/* ── Motion ─────────────────────────────────────────────────── */}
+          {page === "motion" && <Motion />}
+
+          {/* ── Explainer ──────────────────────────────────────────────── */}
+          {page === "explainer" && <Explainer />}
+
           {/* ── Dub ────────────────────────────────────────────────────── */}
           {page === "dub" && <Dub />}
 
@@ -1222,6 +1244,20 @@ function Icon({ name }: { name: Page | "sun" | "moon" }) {
         <svg {...common}>
           <path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z" />
           <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+        </svg>
+      );
+    case "explainer":
+      return (
+        <svg {...common}>
+          <path d="M4 5.5h16v10H4z" />
+          <path d="M9 19.5h6M12 15.5v4M8.5 10.5l3-2.5 2 2 2.5-2.5" />
+        </svg>
+      );
+    case "motion":
+      return (
+        <svg {...common}>
+          <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
+          <path d="M10 9.5l4.5 2.5L10 14.5z" />
         </svg>
       );
     case "direction":

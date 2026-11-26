@@ -847,6 +847,250 @@ export default function Shorts() {
 
       {/* ── 2 ───────────────────────────────────────────────────────────── */}
       <Block
+        title="Voice, visuals & captions"
+        note="The voice list is this app's own — built-in voices and anything you have cloned. A directed read performs each scene, which is livelier but lets the voice drift a little between them; undirected is steadier and flatter."
+      >
+        <div className="shorts-row">
+          <label className="field grow" style={{ marginTop: 0 }}>
+            <span>Voice</span>
+            <span className="select-wrap">
+              <select value={voice} onChange={(e) => setVoice(e.target.value)}>
+                {groups.map((group) => (
+                  <optgroup key={group} label={group}>
+                    {voices
+                      .filter((v) => v.group === group)
+                      .map((v) => (
+                        <option key={v.key} value={v.key}>
+                          {v.label}
+                        </option>
+                      ))}
+                  </optgroup>
+                ))}
+              </select>
+            </span>
+          </label>
+          <label className="field" style={{ marginTop: 0 }}>
+            <span>Read as</span>
+            <span className="select-wrap">
+              <select value={read} onChange={(e) => setRead(e.target.value)}>
+                <option value="">Undirected — steadier, flatter</option>
+                {READS.map((r) => (
+                  <option key={r}>{r}</option>
+                ))}
+              </select>
+            </span>
+          </label>
+          <label className="field" style={{ marginTop: 0 }}>
+            <span>Pace</span>
+            <span className="select-wrap">
+              <select value={pace} onChange={(e) => setPace(e.target.value)}>
+                {["slow", "natural", "fast"].map((p) => (
+                  <option key={p}>{p}</option>
+                ))}
+              </select>
+            </span>
+          </label>
+          <label className="knob" style={{ flex: "1 1 160px" }}>
+            <span>
+              Speed — <strong>{speed.toFixed(2)}×</strong>
+            </span>
+            <input
+              type="range"
+              min={0.75}
+              max={1.5}
+              step={0.05}
+              value={speed}
+              onChange={(e) => setSpeed(Number(e.target.value))}
+            />
+          </label>
+        </div>
+
+        <h3 className="sub-head">Visuals</h3>
+        <div className="chips" style={{ marginTop: 10 }}>
+          {IMAGE_STYLES.map((style) => (
+            <button
+              key={style.key}
+              className={style.key === imageStyle ? "chip active" : "chip"}
+              onClick={() => setImageStyle(style.key)}
+            >
+              {style.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="shorts-row" style={{ marginTop: 12 }}>
+          <label className="field grow" style={{ marginTop: 0 }}>
+            <span>Between scenes</span>
+            <span className="select-wrap">
+              <select value={transition} onChange={(e) => setTransition(e.target.value)}>
+                {TRANSITIONS.map((t) => (
+                  <option key={t.key} value={t.key}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            </span>
+          </label>
+          <label className="field" style={{ marginTop: 0 }}>
+            <span>Length</span>
+            <span className="select-wrap">
+              <select
+                value={transSeconds}
+                disabled={transition === "cut"}
+                onChange={(e) => setTransSeconds(Number(e.target.value))}
+              >
+                {TRANSITION_SPEEDS.map((s) => (
+                  <option key={s.seconds} value={s.seconds}>
+                    {s.label} — {s.seconds}s
+                  </option>
+                ))}
+              </select>
+            </span>
+          </label>
+        </div>
+        <p className="hint muted">
+          {transition === "cut"
+            ? "Scenes cut straight from one to the next — the quickest to render."
+            : "Centred on the cut: every scene still starts at the same second it would with hard cuts."}
+        </p>
+
+        <h3 className="sub-head">Captions</h3>
+        <div className="shorts-row" style={{ marginTop: 10 }}>
+          <label className="switch">
+            <input type="checkbox" checked={capOn} onChange={(e) => setCapOn(e.target.checked)} />
+            <span>Burn in</span>
+          </label>
+          <div className="segmented small">
+            {CAPTION_STYLES.map((s) => (
+              <button
+                key={s.key}
+                className={s.key === capStyle ? "seg active" : "seg"}
+                onClick={() => setCapStyle(s.key)}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+          <div className="segmented small">
+            {(["middle", "bottom"] as const).map((p) => (
+              <button
+                key={p}
+                className={p === capPosition ? "seg active" : "seg"}
+                onClick={() => setCapPosition(p)}
+              >
+                {p === "middle" ? "Middle" : "Bottom"}
+              </button>
+            ))}
+          </div>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={capUpper}
+              onChange={(e) => setCapUpper(e.target.checked)}
+            />
+            <span>UPPERCASE (Latin only)</span>
+          </label>
+        </div>
+
+        <div className="shorts-row" style={{ marginTop: 12 }}>
+          <label className="swatch">
+            <input
+              type="color"
+              value={capHighlight}
+              onChange={(e) => setCapHighlight(e.target.value)}
+            />
+            <span>Spoken word</span>
+          </label>
+          <label className="swatch">
+            <input type="color" value={capText} onChange={(e) => setCapText(e.target.value)} />
+            <span>Other words</span>
+          </label>
+          <div className="chips" style={{ marginTop: 0 }}>
+            {HIGHLIGHTS.map((colour) => (
+              <button
+                key={colour.hex}
+                className={colour.hex === capHighlight.toUpperCase() ? "chip active" : "chip"}
+                title={colour.label}
+                onClick={() => setCapHighlight(colour.hex)}
+              >
+                <span className="dab" style={{ background: colour.hex }} />
+                {colour.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <h3 className="sub-head">Music</h3>
+        <div className="shorts-row" style={{ marginTop: 10 }}>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={musicOn}
+              onChange={(e) => setMusicOn(e.target.checked)}
+            />
+            <span>{musicFile ? "Music under the voice" : "Ambient bed, generated here"}</span>
+          </label>
+          <label className="knob" style={{ flex: "1 1 240px" }}>
+            <span>
+              Volume — <strong>{Math.round(musicVolume * 100)}%</strong>{" "}
+              <span className="muted">
+                {musicVolume > 0
+                  ? `${Math.round(-20 * Math.log10(musicVolume))} dB under the voice while it speaks`
+                  : "silent"}
+              </span>
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={0.5}
+              step={0.01}
+              value={musicVolume}
+              disabled={!musicOn}
+              onChange={(e) => setMusicVolume(Number(e.target.value))}
+            />
+          </label>
+        </div>
+
+        <input
+          ref={musicRef}
+          type="file"
+          accept="audio/*"
+          hidden
+          onChange={async (e) => {
+            const chosen = e.target.files?.[0];
+            if (!chosen) return;
+            try {
+              setMusicFile({ name: chosen.name, path: await uploadFile(chosen) });
+              setMusicOn(true);
+            } catch (err) {
+              setError(err instanceof Error ? err.message : String(err));
+            }
+          }}
+        />
+        <div className="sample-row">
+          <button className="btn ghost" onClick={() => musicRef.current?.click()} disabled={rendering}>
+            Choose a music file…
+          </button>
+          <span className={musicFile ? "sample-name ok" : "sample-name"}>
+            {musicFile ? `✓ ${musicFile.name}` : "None — the generated bed is used"}
+          </span>
+          {musicFile && (
+            <button className="btn ghost tiny" onClick={() => setMusicFile(null)}>
+              Remove
+            </button>
+          )}
+        </div>
+        <p className="hint muted">
+          Any length — it starts at the strongest part of the track, loops or is cut to fit, and
+          fades up from silence. It is brought to the voice's own loudness first, so the slider is
+          a real distance under the voice rather than a fraction of whatever the track was
+          mastered at. 20% is 14 dB under while a line is being spoken — a bed you hear without
+          listening for it — and it comes back up in the gaps on its own.
+        </p>
+      </Block>
+
+      {/* ── 3 ───────────────────────────────────────────────────────────── */}
+      <Block
         title="Script"
         note="Claude writes the first draft and cuts each line into caption-sized pieces. Everything here is yours to edit."
         aside={
@@ -1170,250 +1414,6 @@ export default function Shorts() {
             </div>
           </>
         )}
-      </Block>
-
-      {/* ── 3 ───────────────────────────────────────────────────────────── */}
-      <Block
-        title="Voice, visuals & captions"
-        note="The voice list is this app's own — built-in voices and anything you have cloned. A directed read performs each scene, which is livelier but lets the voice drift a little between them; undirected is steadier and flatter."
-      >
-        <div className="shorts-row">
-          <label className="field grow" style={{ marginTop: 0 }}>
-            <span>Voice</span>
-            <span className="select-wrap">
-              <select value={voice} onChange={(e) => setVoice(e.target.value)}>
-                {groups.map((group) => (
-                  <optgroup key={group} label={group}>
-                    {voices
-                      .filter((v) => v.group === group)
-                      .map((v) => (
-                        <option key={v.key} value={v.key}>
-                          {v.label}
-                        </option>
-                      ))}
-                  </optgroup>
-                ))}
-              </select>
-            </span>
-          </label>
-          <label className="field" style={{ marginTop: 0 }}>
-            <span>Read as</span>
-            <span className="select-wrap">
-              <select value={read} onChange={(e) => setRead(e.target.value)}>
-                <option value="">Undirected — steadier, flatter</option>
-                {READS.map((r) => (
-                  <option key={r}>{r}</option>
-                ))}
-              </select>
-            </span>
-          </label>
-          <label className="field" style={{ marginTop: 0 }}>
-            <span>Pace</span>
-            <span className="select-wrap">
-              <select value={pace} onChange={(e) => setPace(e.target.value)}>
-                {["slow", "natural", "fast"].map((p) => (
-                  <option key={p}>{p}</option>
-                ))}
-              </select>
-            </span>
-          </label>
-          <label className="knob" style={{ flex: "1 1 160px" }}>
-            <span>
-              Speed — <strong>{speed.toFixed(2)}×</strong>
-            </span>
-            <input
-              type="range"
-              min={0.75}
-              max={1.5}
-              step={0.05}
-              value={speed}
-              onChange={(e) => setSpeed(Number(e.target.value))}
-            />
-          </label>
-        </div>
-
-        <h3 className="sub-head">Visuals</h3>
-        <div className="chips" style={{ marginTop: 10 }}>
-          {IMAGE_STYLES.map((style) => (
-            <button
-              key={style.key}
-              className={style.key === imageStyle ? "chip active" : "chip"}
-              onClick={() => setImageStyle(style.key)}
-            >
-              {style.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="shorts-row" style={{ marginTop: 12 }}>
-          <label className="field grow" style={{ marginTop: 0 }}>
-            <span>Between scenes</span>
-            <span className="select-wrap">
-              <select value={transition} onChange={(e) => setTransition(e.target.value)}>
-                {TRANSITIONS.map((t) => (
-                  <option key={t.key} value={t.key}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
-            </span>
-          </label>
-          <label className="field" style={{ marginTop: 0 }}>
-            <span>Length</span>
-            <span className="select-wrap">
-              <select
-                value={transSeconds}
-                disabled={transition === "cut"}
-                onChange={(e) => setTransSeconds(Number(e.target.value))}
-              >
-                {TRANSITION_SPEEDS.map((s) => (
-                  <option key={s.seconds} value={s.seconds}>
-                    {s.label} — {s.seconds}s
-                  </option>
-                ))}
-              </select>
-            </span>
-          </label>
-        </div>
-        <p className="hint muted">
-          {transition === "cut"
-            ? "Scenes cut straight from one to the next — the quickest to render."
-            : "Centred on the cut: every scene still starts at the same second it would with hard cuts."}
-        </p>
-
-        <h3 className="sub-head">Captions</h3>
-        <div className="shorts-row" style={{ marginTop: 10 }}>
-          <label className="switch">
-            <input type="checkbox" checked={capOn} onChange={(e) => setCapOn(e.target.checked)} />
-            <span>Burn in</span>
-          </label>
-          <div className="segmented small">
-            {CAPTION_STYLES.map((s) => (
-              <button
-                key={s.key}
-                className={s.key === capStyle ? "seg active" : "seg"}
-                onClick={() => setCapStyle(s.key)}
-              >
-                {s.label}
-              </button>
-            ))}
-          </div>
-          <div className="segmented small">
-            {(["middle", "bottom"] as const).map((p) => (
-              <button
-                key={p}
-                className={p === capPosition ? "seg active" : "seg"}
-                onClick={() => setCapPosition(p)}
-              >
-                {p === "middle" ? "Middle" : "Bottom"}
-              </button>
-            ))}
-          </div>
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={capUpper}
-              onChange={(e) => setCapUpper(e.target.checked)}
-            />
-            <span>UPPERCASE (Latin only)</span>
-          </label>
-        </div>
-
-        <div className="shorts-row" style={{ marginTop: 12 }}>
-          <label className="swatch">
-            <input
-              type="color"
-              value={capHighlight}
-              onChange={(e) => setCapHighlight(e.target.value)}
-            />
-            <span>Spoken word</span>
-          </label>
-          <label className="swatch">
-            <input type="color" value={capText} onChange={(e) => setCapText(e.target.value)} />
-            <span>Other words</span>
-          </label>
-          <div className="chips" style={{ marginTop: 0 }}>
-            {HIGHLIGHTS.map((colour) => (
-              <button
-                key={colour.hex}
-                className={colour.hex === capHighlight.toUpperCase() ? "chip active" : "chip"}
-                title={colour.label}
-                onClick={() => setCapHighlight(colour.hex)}
-              >
-                <span className="dab" style={{ background: colour.hex }} />
-                {colour.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <h3 className="sub-head">Music</h3>
-        <div className="shorts-row" style={{ marginTop: 10 }}>
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={musicOn}
-              onChange={(e) => setMusicOn(e.target.checked)}
-            />
-            <span>{musicFile ? "Music under the voice" : "Ambient bed, generated here"}</span>
-          </label>
-          <label className="knob" style={{ flex: "1 1 240px" }}>
-            <span>
-              Volume — <strong>{Math.round(musicVolume * 100)}%</strong>{" "}
-              <span className="muted">
-                {musicVolume > 0
-                  ? `${Math.round(-20 * Math.log10(musicVolume))} dB under the voice while it speaks`
-                  : "silent"}
-              </span>
-            </span>
-            <input
-              type="range"
-              min={0}
-              max={0.5}
-              step={0.01}
-              value={musicVolume}
-              disabled={!musicOn}
-              onChange={(e) => setMusicVolume(Number(e.target.value))}
-            />
-          </label>
-        </div>
-
-        <input
-          ref={musicRef}
-          type="file"
-          accept="audio/*"
-          hidden
-          onChange={async (e) => {
-            const chosen = e.target.files?.[0];
-            if (!chosen) return;
-            try {
-              setMusicFile({ name: chosen.name, path: await uploadFile(chosen) });
-              setMusicOn(true);
-            } catch (err) {
-              setError(err instanceof Error ? err.message : String(err));
-            }
-          }}
-        />
-        <div className="sample-row">
-          <button className="btn ghost" onClick={() => musicRef.current?.click()} disabled={rendering}>
-            Choose a music file…
-          </button>
-          <span className={musicFile ? "sample-name ok" : "sample-name"}>
-            {musicFile ? `✓ ${musicFile.name}` : "None — the generated bed is used"}
-          </span>
-          {musicFile && (
-            <button className="btn ghost tiny" onClick={() => setMusicFile(null)}>
-              Remove
-            </button>
-          )}
-        </div>
-        <p className="hint muted">
-          Any length — it starts at the strongest part of the track, loops or is cut to fit, and
-          fades up from silence. It is brought to the voice's own loudness first, so the slider is
-          a real distance under the voice rather than a fraction of whatever the track was
-          mastered at. 20% is 14 dB under while a line is being spoken — a bed you hear without
-          listening for it — and it comes back up in the gaps on its own.
-        </p>
       </Block>
 
       {/* ── 4 ───────────────────────────────────────────────────────────── */}

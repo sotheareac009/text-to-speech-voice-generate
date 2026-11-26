@@ -330,3 +330,254 @@ export async function uploadFile(file: File): Promise<string> {
 
 /** The old name, kept so the poster page does not have to change. */
 export const uploadImage = uploadFile;
+
+/* ── Motion films ────────────────────────────────────────────────────────
+ *
+ * The other kind of video, on its own endpoints and in its own folder on the
+ * engine. Nothing here touches the shorts library: a film is not a short and
+ * a list that mixed them would hand one to a screen that cannot open it.
+ */
+
+export interface MotionSceneText {
+  say: string;
+  headline: string;
+  highlight?: string[];
+  chips?: string[];
+  kicker?: string;
+  art?: Record<string, unknown>;
+}
+
+export interface MotionScript {
+  title: string;
+  caption: string;
+  hashtags: string[];
+  musicMood: Script["musicMood"];
+  scenes: MotionSceneText[];
+}
+
+export interface MotionItem {
+  id: string;
+  project?: string;
+  script: MotionScript;
+  look?: string;
+  design?: MotionStyle["design"];
+  file: string;
+  title: string;
+  seconds: number;
+  bytes: number;
+  created: number;
+  request?: {
+    idea?: string;
+    language?: string;
+    tone?: string;
+    seconds?: number;
+    voice?: { key: string; style?: string };
+    music?: { on: boolean; volume: number; file?: string };
+    look?: string;
+    mark?: string;
+  };
+}
+
+export const motionUrl = (file: string) => `${BASE}/motion/${file}`;
+
+/**
+ * A 404 from a motion route means one thing, and it is not "not found".
+ *
+ * The engine is `node dist/server/index.js`, a build frozen at the moment it
+ * was made: an engine started before Motion existed answers every one of
+ * these routes with Fastify's own 404, which surfaces as the word "Not Found"
+ * and explains nothing. An hour was lost to the same thing with a caption
+ * fix. Say what it actually is.
+ */
+function staleEngine(status: number): Error | null {
+  return status === 404
+    ? new Error(
+        "This engine was started before Motion existed, so it has none of its routes. " +
+          "Stop it (Ctrl+C) and run `npm start` again — or `npm run dev`, which reloads itself.",
+      )
+    : null;
+}
+
+export const listFilms = () =>
+  fetch(`${BASE}/api/motion/videos`).then((r) => {
+    const stale = staleEngine(r.status);
+    if (stale) throw stale;
+    return r.json() as Promise<MotionItem[]>;
+  });
+
+export async function startMotion(request: unknown): Promise<{ jobId: string }> {
+  const res = await fetch(`${BASE}/api/motion`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  const stale = staleEngine(res.status);
+  if (stale) throw stale;
+  const data = (await res.json().catch(() => ({}))) as { jobId?: string; error?: string };
+  if (!res.ok) throw new Error(data.error || `The engine answered ${res.status}.`);
+  return { jobId: data.jobId as string };
+}
+
+export const motionFilePath = (file: string) =>
+  fetch(`${BASE}/api/motion/videos/${encodeURIComponent(file)}/path`).then(async (r) => {
+    if (!r.ok) throw new Error(`The engine could not find ${file}.`);
+    return (await r.json()) as { path: string };
+  });
+
+export interface MotionStyle {
+  name: string;
+  look: string;
+  design: {
+    align: string;
+    height: string;
+    pills: string;
+    energy: string;
+    backdrop: string;
+  };
+  from?: string;
+  created: number;
+}
+
+export const listStyles = () =>
+  fetch(`${BASE}/api/motion/styles`).then((r) => {
+    const stale = staleEngine(r.status);
+    if (stale) throw stale;
+    return r.json() as Promise<MotionStyle[]>;
+  });
+
+export const saveStyle = (body: unknown) => post<MotionStyle[]>("/api/motion/styles", body);
+
+export const deleteStyle = (name: string) =>
+  fetch(`${BASE}/api/motion/styles/${encodeURIComponent(name)}`, { method: "DELETE" }).then(
+    (r) => r.json() as Promise<MotionStyle[]>,
+  );
+
+export const deleteFilm = (id: string) =>
+  fetch(`${BASE}/api/motion/videos/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) =>
+    r.json(),
+  );
+
+/* ── Explainers, written by the motion-graphics skills ───────────────────
+ *
+ * Not drawn by the engine: Claude Code writes the animation and renders it.
+ * Its own endpoints and its own folder, like everything else that is not a
+ * short.
+ */
+
+export interface ExplainerStyle {
+  key: string;
+  label: string;
+  blurb: string;
+  /** What this style is usually. */
+  seconds: number;
+  /** And the range it is designed to work inside. */
+  min: number;
+  max: number;
+}
+
+export interface ExplainerItem {
+  id: string;
+  /** Set when this is a voiced copy: the id of the video underneath it. */
+  source?: string;
+  /** What it was asked for, so the brief can be taken back into the form. */
+  request?: {
+    idea?: string;
+    style?: string;
+    format?: string;
+    seconds?: number;
+    takeaway?: string;
+    brand?: string;
+    url?: string;
+    notes?: string;
+    textLanguage?: string;
+    pace?: "slow" | "normal" | "fast";
+    quality?: "draft" | "final";
+  };
+  title: string;
+  style: string;
+  file: string;
+  page?: string;
+  seconds: number;
+  bytes: number;
+  created: number;
+}
+
+export const explainerUrl = (file: string) => `${BASE}/explainers/${file}`;
+
+export const getExplainers = () =>
+  fetch(`${BASE}/api/explainers`).then((r) => {
+    const stale = staleEngine(r.status);
+    if (stale) throw stale;
+    return r.json() as Promise<{ styles: ExplainerStyle[]; items: ExplainerItem[] }>;
+  });
+
+export async function startExplainer(request: unknown): Promise<{ jobId: string }> {
+  const res = await fetch(`${BASE}/api/explainer`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  const stale = staleEngine(res.status);
+  if (stale) throw stale;
+  const data = (await res.json().catch(() => ({}))) as { jobId?: string; error?: string };
+  if (!res.ok) throw new Error(data.error || `The engine answered ${res.status}.`);
+  return { jobId: data.jobId as string };
+}
+
+export interface ExplainerSuggestion {
+  style: string;
+  seconds: number;
+  takeaway: string;
+  brand: string;
+  notes: string;
+  why: string;
+}
+
+/** The rest of the brief, worked out from the idea. Slow enough to need the queue. */
+export const suggestBrief = (idea: string, format: string) =>
+  waitFor<ExplainerSuggestion>("/api/explainer/brief", { idea, format });
+
+/** A voice over an explainer that is already finished. */
+export const startExplainerVoice = (
+  id: string,
+  body: {
+    language: string;
+    voice: { key: string; style?: string };
+    under?: number;
+    captions?: boolean;
+    colours?: { highlight: string; text: string };
+    /** Write the narration again instead of reusing the one already saved. */
+    rewrite?: boolean;
+    /** The narration as the person left it. */
+    lines?: NarrationLine[];
+  },
+) => post<{ jobId: string }>(`/api/explainer/${encodeURIComponent(id)}/voice`, body);
+
+export interface NarrationLine {
+  at: number;
+  say: string;
+  /** Speak this one again even though the words have not changed. */
+  retake?: boolean;
+  /** The take that was used, inside the explainers folder, for playing back. */
+  take?: string;
+  /** How long that take runs. */
+  seconds?: number;
+}
+
+/** The narration a voiced explainer was made from. */
+export const getNarration = (id: string) =>
+  fetch(`${BASE}/api/explainer/${encodeURIComponent(id)}/narration`).then((r) => {
+    const stale = staleEngine(r.status);
+    if (stale) throw stale;
+    return r.json() as Promise<{ lines: NarrationLine[] }>;
+  });
+
+/** The same film, re-drawn on a faster or slower clock. */
+export const startRetime = (id: string, speed: number) =>
+  post<{ jobId: string }>(`/api/explainer/${encodeURIComponent(id)}/retime`, { speed });
+
+export const explainerPath = (file: string) =>
+  fetch(`${BASE}/api/explainers/${encodeURIComponent(file)}/path`).then(async (r) => {
+    if (!r.ok) throw new Error(`The engine could not find ${file}.`);
+    return (await r.json()) as { path: string };
+  });
